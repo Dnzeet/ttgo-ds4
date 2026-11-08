@@ -1,13 +1,13 @@
 // Tes kontroler Bluetooth (DualShock 4 dll.) untuk LilyGo T-Display (TTGO, ESP32 biasa)
 // Bluepad32: ESP32 scan sendiri, DS4 dipairing dengan PS+Share.
 //
-// Tombol bawah (GPIO0): klik = halaman berikutnya, tahan = halaman sebelumnya
-// Tombol atas (GPIO35): pilih / aksi di halaman:
-//   TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak | OUTPUT: ganti warna/mode
-//   STATUS: ganti kontroler (tahan 2 dtk: lupakan pairing) | GETAR: ganti pola
-//   SETELAN: kecerahan +10% / bahasa / tema (tahan 0,7 dtk lalu lepas: pindah baris) | STATS: reset jeda maks
-//   tahan tombol atas 3 dtk: power off (ada bar hitung mundur, lepas sebelum penuh = batal)
-//   menyalakan: tekan sekali
+// Tombol atas (GPIO35):  tahan 0,35 dtk = halaman berikutnya | dobel klik (< 450 ms) = power off
+// Tombol bawah (GPIO0):  klik = pilih/aksi | tahan 0,35 dtk = halaman sebelumnya
+//   Aksi klik bawah per halaman:
+//   STATUS: ganti kontroler | TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak
+//   GETAR: ganti pola | OUTPUT: ganti warna/mode | STATS: reset jeda maks
+//   SETELAN: klik = ubah nilai baris aktif, dobel klik = pindah baris
+//   menyalakan: tekan tombol atas sekali
 
 #include <Arduino.h>
 #include <math.h>
@@ -17,6 +17,7 @@
 #include <TFT_eSPI.h>
 #include <Bluepad32.h>
 
+#define HOLD_MS 350  // lama tahan untuk pindah halaman (ms)
 #define BTN_TOP 35
 #define BTN_BOTTOM 0
 #define BAT_ADC 34
@@ -26,61 +27,31 @@ TFT_eSPI tft;
 Preferences prefs;
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
-// ---------- warna ----------
+// ---------- warna & tema ----------
 #define RGB(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
-// ---------- tema ----------
-// Tema disimpan di Preferences ("theme"), diganti dari halaman SETELAN.
-struct Theme {
-  const char *name;
-  bool sharp;  // true = sudut kotak (gaya retro)
-  uint16_t bg, bar, panel, off, dim, txt, sub, acc, ok, warn, bad, pink;
-  uint16_t fCross, fCircle, fSquare, fTri;      // warna tombol hadap
-  uint16_t padBody, padPlate, padStick, padKey;  // gambar kontroler di splash
-};
-
-static const Theme THEMES[] = {
-    // 0: Default (tampilan asli)
-    {"Default", false,
-     RGB(8, 10, 18), RGB(20, 26, 48), RGB(24, 30, 52), RGB(52, 58, 82), RGB(90, 98, 124), RGB(232, 237, 247),
-     RGB(140, 150, 175), RGB(0, 205, 255), RGB(60, 225, 125), RGB(255, 190, 40), RGB(255, 75, 75), RGB(255, 130, 205),
-     RGB(90, 150, 255), RGB(255, 90, 90), RGB(255, 130, 205), RGB(70, 225, 150),
-     RGB(44, 50, 80), RGB(70, 78, 112), RGB(24, 28, 46), RGB(140, 150, 175)},
-    // 1: AMOLED (hitam pekat, card/panel hijau gelap, aksen hijau)
-    {"AMOLED", false,
-     RGB(0, 0, 0), RGB(0, 20, 11), RGB(5, 28, 16), RGB(16, 52, 32), RGB(46, 100, 70), RGB(226, 255, 236),
-     RGB(112, 172, 138), RGB(0, 230, 120), RGB(70, 255, 140), RGB(255, 200, 50), RGB(255, 85, 85), RGB(150, 255, 205),
-     RGB(110, 200, 255), RGB(255, 100, 100), RGB(190, 255, 215), RGB(70, 255, 150),
-     RGB(10, 38, 22), RGB(20, 66, 40), RGB(2, 14, 8), RGB(112, 172, 138)},
-    // 2: Game Boy (4 nuansa hijau olive ala DMG, sudut kotak)
-    {"GameBoy", true,
-     RGB(155, 188, 15), RGB(118, 150, 22), RGB(133, 166, 18), RGB(100, 135, 25), RGB(70, 108, 30), RGB(15, 56, 15),
-     RGB(48, 98, 48), RGB(15, 56, 15), RGB(15, 56, 15), RGB(48, 98, 48), RGB(15, 56, 15), RGB(48, 98, 48),
-     RGB(15, 56, 15), RGB(15, 56, 15), RGB(48, 98, 48), RGB(48, 98, 48),
-     RGB(48, 98, 48), RGB(139, 172, 15), RGB(15, 56, 15), RGB(155, 188, 15)},
-};
-#define NTHEMES ((uint8_t)(sizeof(THEMES) / sizeof(THEMES[0])))
-
+struct Theme { uint16_t bg, bar, panel, trk, off, dim, txt, sub, acc, ok, warn, bad, pink, fx, fo, ft; };
+static const Theme THEMES[3] = {
+  // 0 Default
+  {RGB(8, 10, 18), RGB(20, 26, 48), RGB(24, 30, 52), RGB(20, 26, 48), RGB(52, 58, 82), RGB(90, 98, 124),
+   RGB(232, 237, 247), RGB(140, 150, 175), RGB(0, 205, 255), RGB(60, 225, 125), RGB(255, 190, 40),
+   RGB(255, 75, 75), RGB(255, 130, 205), RGB(90, 150, 255), RGB(255, 90, 90), RGB(70, 225, 150)},
+  // 1 AMOLED Mono: hitam murni, panel abu arang, aksen putih
+  {RGB(0, 0, 0), RGB(12, 12, 12), RGB(21, 21, 21), RGB(38, 38, 38), RGB(52, 52, 52), RGB(84, 84, 84),
+   RGB(242, 242, 242), RGB(154, 154, 154), RGB(255, 255, 255), RGB(124, 224, 138), RGB(255, 190, 60),
+   RGB(255, 90, 90), RGB(200, 200, 200), RGB(235, 235, 235), RGB(190, 190, 190), RGB(150, 150, 150)},
+  // 2 Sky Light: tema terang
+  {RGB(242, 247, 251), RGB(220, 232, 245), RGB(255, 255, 255), RGB(210, 221, 235), RGB(203, 213, 225), RGB(148, 163, 184),
+   RGB(15, 23, 42), RGB(100, 116, 139), RGB(37, 99, 235), RGB(22, 163, 74), RGB(217, 119, 6),
+   RGB(220, 38, 38), RGB(219, 39, 119), RGB(37, 99, 235), RGB(220, 38, 38), RGB(22, 163, 74)}};
 static uint8_t themeIdx = 0;
-static const Theme *TH = &THEMES[0];
-static uint16_t C_BG, C_BAR, C_PANEL, C_OFF, C_DIM, C_TXT, C_SUB, C_ACC, C_OK, C_WARN, C_BAD, C_PINK;
-#define RAD(r) (TH->sharp ? 0 : (r))  // radius sudut: 0 untuk tema retro
+static uint16_t C_BG, C_BAR, C_PANEL, C_TRK, C_OFF, C_DIM, C_TXT, C_SUB, C_ACC, C_OK, C_WARN, C_BAD, C_PINK,
+    C_FX, C_FO, C_FT;
 
 static void applyTheme(uint8_t i) {
-  if (i >= NTHEMES) i = 0;
-  themeIdx = i;
-  TH = &THEMES[i];
-  C_BG = TH->bg;
-  C_BAR = TH->bar;
-  C_PANEL = TH->panel;
-  C_OFF = TH->off;
-  C_DIM = TH->dim;
-  C_TXT = TH->txt;
-  C_SUB = TH->sub;
-  C_ACC = TH->acc;
-  C_OK = TH->ok;
-  C_WARN = TH->warn;
-  C_BAD = TH->bad;
-  C_PINK = TH->pink;
+  const Theme &t = THEMES[i];
+  C_BG = t.bg; C_BAR = t.bar; C_PANEL = t.panel; C_TRK = t.trk; C_OFF = t.off; C_DIM = t.dim;
+  C_TXT = t.txt; C_SUB = t.sub; C_ACC = t.acc; C_OK = t.ok; C_WARN = t.warn; C_BAD = t.bad;
+  C_PINK = t.pink; C_FX = t.fx; C_FO = t.fo; C_FT = t.ft;
 }
 
 // ---------- halaman ----------
@@ -112,7 +83,6 @@ static uint32_t evCount = 0, lastEvMs = 0, maxGap = 0;
 static uint32_t connCount = 0, discCount = 0;
 static uint32_t evPerSec = 0, prevEv = 0, prevEvT = 0;
 static uint32_t forgetMsgUntil = 0;
-static bool offOverlayOn = false;  // overlay hitung mundur power off sedang tampil
 
 // ---------- kecerahan layar (PWM backlight) ----------
 #define BL_CH 0
@@ -393,10 +363,10 @@ static bool pressedNow(ControllerPtr c, int i) {
 
 static uint16_t btnBase(int i) {
   switch (i) {
-    case B_CROSS: return TH->fCross;
-    case B_CIRCLE: return TH->fCircle;
-    case B_SQUARE: return TH->fSquare;
-    case B_TRI: return TH->fTri;
+    case B_CROSS: return C_FX;
+    case B_CIRCLE: return C_FO;
+    case B_SQUARE: return C_PINK;
+    case B_TRI: return C_FT;
     default: return C_ACC;
   }
 }
@@ -435,8 +405,8 @@ static void drawButton(int i, int st) {
       else if (i == B_DOWN) { x = 43; y = 87; }
       else if (i == B_LEFT) { x = 28; y = 72; }
       else { x = 58; y = 72; }
-      tft.fillRoundRect(x, y, 15, 15, RAD(3), fill);
-      tft.drawRoundRect(x, y, 15, 15, RAD(3), ln);
+      tft.fillRoundRect(x, y, 15, 15, 3, fill);
+      tft.drawRoundRect(x, y, 15, 15, 3, ln);
       int cx = x + 7, cy = y + 7;
       if (i == B_UP) tft.fillTriangle(cx, cy - 3, cx - 3, cy + 2, cx + 3, cy + 2, shape);
       else if (i == B_DOWN) tft.fillTriangle(cx, cy + 3, cx - 3, cy - 2, cx + 3, cy - 2, shape);
@@ -457,8 +427,8 @@ static void drawButton(int i, int st) {
     }
     case B_L1: case B_R1: {
       int x = i == B_L1 ? 6 : 172;
-      tft.fillRoundRect(x, 35, 62, 11, RAD(4), fill);
-      tft.drawRoundRect(x, 35, 62, 11, RAD(4), ln);
+      tft.fillRoundRect(x, 35, 62, 11, 4, fill);
+      tft.drawRoundRect(x, 35, 62, 11, 4, ln);
       tft.setTextDatum(MC_DATUM);
       tft.setTextColor(shape, fill);
       tft.drawString(i == B_L1 ? "L1" : "R1", x + 31, 41, 1);
@@ -481,8 +451,8 @@ static void drawButton(int i, int st) {
     }
     case B_SHARE: case B_OPT: {
       int x = i == B_SHARE ? 76 : 154;
-      tft.fillRoundRect(x, 30, 10, 16, RAD(3), fill);
-      tft.drawRoundRect(x, 30, 10, 16, RAD(3), ln);
+      tft.fillRoundRect(x, 30, 10, 16, 3, fill);
+      tft.drawRoundRect(x, 30, 10, 16, 3, ln);
       tft.setTextDatum(TC_DATUM);
       tft.setTextColor(C_SUB, C_BG);
       tft.drawString(i == B_SHARE ? "SHR" : "OPT", x + 5, 48, 1);
@@ -512,8 +482,8 @@ static void pageButtons(ControllerPtr c) {
     }
     if (btested[i]) cnt++;
   }
-  hbar(22, 24, 46, 8, pv_l2, c ? c->brake() : 0, 1023, C_WARN, C_BAR);
-  hbar(172, 24, 46, 8, pv_r2, c ? c->throttle() : 0, 1023, C_WARN, C_BAR);
+  hbar(22, 24, 46, 8, pv_l2, c ? c->brake() : 0, 1023, C_WARN, C_TRK);
+  hbar(172, 24, 46, 8, pv_r2, c ? c->throttle() : 0, 1023, C_WARN, C_TRK);
 
   for (int s = 0; s < 2; s++) {
     int ax = c ? (s ? c->axisRX() : c->axisX()) : 0;
@@ -534,7 +504,7 @@ static void pageButtons(ControllerPtr c) {
   put(1, 6, 106, 1, TL_DATUM, C_SUB, C_BG, 0, T("TERUJI", "TESTED"));
   if (c) put(0, 6, 116, 2, TL_DATUM, cnt == NB ? C_OK : C_TXT, C_BG, 64, "%d/%d", cnt, NB);
   else put(0, 6, 116, 2, TL_DATUM, C_WARN, C_BG, 64, T("Tunggu..", "Wait.."));
-  put(2, 172, 120, 1, TL_DATUM, C_SUB, C_BG, 0, T("Atas: reset", "Top: reset"));
+  put(2, 172, 120, 1, TL_DATUM, C_SUB, C_BG, 0, T("Bawah: reset", "Bottom: reset"));
 }
 
 // ---------- halaman TRIGGER ----------
@@ -545,8 +515,8 @@ static void pageTrigger(ControllerPtr c) {
   int l = c ? c->brake() : 0, r = c ? c->throttle() : 0;
   if (l > peakL) peakL = l;
   if (r > peakR) peakR = r;
-  vbar(24, 70, 56, 58, pv_tl, l, 1023, C_ACC, C_BAR);
-  vbar(160, 70, 56, 58, pv_tr, r, 1023, C_PINK, C_BAR);
+  vbar(24, 70, 56, 58, pv_tl, l, 1023, C_ACC, C_TRK);
+  vbar(160, 70, 56, 58, pv_tr, r, 1023, C_PINK, C_TRK);
   if (peakL > 0) tft.drawFastHLine(24, 70 + 58 - (int)(58L * peakL / 1023), 56, C_TXT);
   if (peakR > 0) tft.drawFastHLine(160, 70 + 58 - (int)(58L * peakR / 1023), 56, C_TXT);
 
@@ -557,7 +527,7 @@ static void pageTrigger(ControllerPtr c) {
   put(4, 120, 72, 1, TC_DATUM, C_SUB, C_BG, 0, T("PUNCAK", "PEAK"));
   put(5, 120, 86, 2, TC_DATUM, C_WARN, C_BG, 76, "%d%% %d%%", (int)(peakL * 100L / 1023), (int)(peakR * 100L / 1023));
   put(6, 120, 108, 1, TC_DATUM, C_SUB, C_BG, 76, "%d | %d", l, r);
-  put(7, 120, 122, 1, TC_DATUM, C_SUB, C_BG, 0, T("Atas: reset", "Top: reset"));
+  put(7, 120, 122, 1, TC_DATUM, C_SUB, C_BG, 0, T("Bawah: reset", "Bottom: reset"));
 }
 
 // ---------- halaman STIK ----------
@@ -611,7 +581,7 @@ static void pageStick(ControllerPtr c) {
   }
   put(2, 62, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KIRI", "LEFT STICK"));
   put(3, 178, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KANAN", "RIGHT STICK"));
-  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, T("Atas", "Top"));
+  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, T("Bawah", "Bottom"));
   put(5, 120, 66, 1, TC_DATUM, C_SUB, C_BG, 0, "reset");
 }
 
@@ -625,7 +595,7 @@ static void centerBar(int row, int val, int range, uint16_t col) {
   if (off < -80) off = -80;
   if (off == pvs[row]) return;
   pvs[row] = off;
-  tft.fillRect(30, y, 160, 11, C_BAR);
+  tft.fillRect(30, y, 160, 11, C_TRK);
   if (off > 0) tft.fillRect(110, y, off, 11, col);
   else if (off < 0) tft.fillRect(110 + off, y, -off, 11, col);
   tft.drawFastVLine(110, y, 11, C_TXT);
@@ -655,17 +625,17 @@ static uint8_t drawnSel = 255;
 static void drawOutputUI() {
   for (int i = 0; i < NPRESET; i++) {
     int x = 8 + (i % 5) * 46, y = 26 + (i / 5) * 30;
-    tft.fillRoundRect(x, y, 40, 24, RAD(4), tft.color565(PRESETS[i].r, PRESETS[i].g, PRESETS[i].b));
-    tft.drawRoundRect(x, y, 40, 24, RAD(4), C_DIM);
-    tft.drawRoundRect(x - 2, y - 2, 44, 28, RAD(5), i == sel ? C_TXT : C_BG);
-    tft.drawRoundRect(x - 3, y - 3, 46, 30, RAD(6), i == sel ? C_TXT : C_BG);
+    tft.fillRoundRect(x, y, 40, 24, 4, tft.color565(PRESETS[i].r, PRESETS[i].g, PRESETS[i].b));
+    tft.drawRoundRect(x, y, 40, 24, 4, C_DIM);
+    tft.drawRoundRect(x - 2, y - 2, 44, 28, 5, i == sel ? C_TXT : C_BG);
+    tft.drawRoundRect(x - 3, y - 3, 46, 30, 6, i == sel ? C_TXT : C_BG);
   }
   for (int k = 0; k < 3; k++) {
     int x = 8 + k * 76;
     bool on = (sel == NPRESET + k);
-    tft.fillRoundRect(x, 104, 70, 20, RAD(5), on ? C_ACC : C_BAR);
+    tft.fillRoundRect(x, 104, 70, 20, 5, on ? C_ACC : C_PANEL);
     tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(on ? C_BG : C_SUB, on ? C_ACC : C_BAR);
+    tft.setTextColor(on ? C_BG : C_SUB, on ? C_ACC : C_PANEL);
     tft.setTextPadding(0);
     tft.drawString(MODE_NAME(k), x + 35, 114, 2);
   }
@@ -680,7 +650,7 @@ static void pageOutput(ControllerPtr c) {
   else put(0, 8, 84, 2, TL_DATUM, C_ACC, C_BG, 224, "Mode %s", MODE_NAME(sel - NPRESET));
   if (sel == NPRESET) put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("RGB: stik kiri+R2 | rumble: R2/L2", "RGB: left stick+R2 | rumble: R2/L2"));
   else if (sel == NPRESET + 2) put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("Default: kontroler 1 biru, 2 merah", "Default: ctrl 1 blue, 2 red"));
-  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("Atas: ganti | tidak disimpan", "Top: change | not saved"));
+  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("Bawah: ganti | tidak disimpan", "Bottom: change | not saved"));
 }
 
 // ---------- halaman STATS ----------
@@ -711,7 +681,7 @@ static int readBatteryMv() {
 }
 
 static void drawStatusCard2() {
-  tft.fillRoundRect(6, 80, 228, 54, RAD(6), C_PANEL);
+  tft.fillRoundRect(6, 80, 228, 54, 6, C_PANEL);
 }
 
 static void pageStatus(ControllerPtr c) {
@@ -720,7 +690,7 @@ static void pageStatus(ControllerPtr c) {
 
   if (state != st_shown) {
     st_shown = state;
-    tft.fillRoundRect(6, 24, 228, 52, RAD(6), C_PANEL);
+    tft.fillRoundRect(6, 24, 228, 52, 6, C_PANEL);
     for (int i = 0; i < 4; i++) tc_s[i][0] = 0;
     pv_bat = -1;
     dotsKey = -1;
@@ -731,7 +701,7 @@ static void pageStatus(ControllerPtr c) {
         tft.drawLine(22, 50 + d, 26, 55 + d, C_BG);
         tft.drawLine(26, 55 + d, 34, 44 + d, C_BG);
       }
-      tft.drawRoundRect(132, 58, 56, 10, RAD(2), C_SUB);
+      tft.drawRoundRect(132, 58, 56, 10, 2, C_SUB);
     } else {
       tft.drawCircle(28, 50, 12, C_WARN);
     }
@@ -755,7 +725,7 @@ static void pageStatus(ControllerPtr c) {
       }
     }
     int pct = c->battery() * 100 / 255;
-    hbar(133, 59, 54, 8, pv_bat, pct, 100, pct > 50 ? C_OK : (pct > 20 ? C_WARN : C_BAD), C_BAR);
+    hbar(133, 59, 54, 8, pv_bat, pct, 100, pct > 50 ? C_OK : (pct > 20 ? C_WARN : C_BAD), C_TRK);
     put(2, 196, 56, 2, TL_DATUM, C_TXT, C_PANEL, 36, "%d%%", pct);
   } else {
     put(0, 50, 28, 4, TL_DATUM, C_TXT, C_PANEL, 176, T("Mencari...", "Searching..."));
@@ -785,9 +755,9 @@ static void pageStatus(ControllerPtr c) {
   put(7, 226, 100, 2, TR_DATUM, C_TXT, C_PANEL, 90, "%lu / %lu", (unsigned long)connCount, (unsigned long)discCount);
   int nCtl = connectedCount();
   if (millis() < forgetMsgUntil) put(8, 14, 118, 1, TL_DATUM, C_WARN, C_PANEL, 210, T("Pairing dihapus!", "Pairing cleared!"));
-  else if (nCtl > 1 && (millis() / 2500) % 2 == 0) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, T("Kontroler %d/%d | Atas klik: ganti", "Ctrl %d/%d | Top click: switch"), __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
-  else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Atas tahan 2 dtk: lupakan pairing", "Top hold 2s: forget pairing"));
-  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Bawah: klik maju, tahan mundur", "Bottom: click next, hold back"));
+  else if (nCtl > 1 && (millis() / 2500) % 2 == 0) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, T("Kontroler %d/%d | Bawah klik: ganti", "Ctrl %d/%d | Bottom click: switch"), __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
+  else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Atas dobel klik: power off", "Top double-click: power off"));
+  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Tahan atas: maju, bawah: mundur", "Hold top: next, bottom: back"));
 }
 
 // ---------- halaman GETAR ----------
@@ -798,57 +768,69 @@ static void pageVibrate(ControllerPtr c) {
   put(1, 232, 26, 2, TR_DATUM, vibeMode ? C_OK : C_DIM, C_BG, 150, "%s", VIBE_NAME(vibeMode));
   put(2, 8, 52, 2, TL_DATUM, C_SUB, C_BG, 0, T("Besar", "Strong"));
   put(3, 8, 74, 2, TL_DATUM, C_SUB, C_BG, 0, T("Ringan", "Light"));
-  hbar(66, 55, 118, 12, pv_vs, curStrong, 255, C_ACC, C_BAR);
-  hbar(66, 77, 118, 12, pv_vw, curWeak, 255, C_PINK, C_BAR);
+  hbar(66, 55, 118, 12, pv_vs, curStrong, 255, C_ACC, C_TRK);
+  hbar(66, 77, 118, 12, pv_vw, curWeak, 255, C_PINK, C_TRK);
   put(4, 232, 52, 2, TR_DATUM, C_TXT, C_BG, 44, "%d%%", curStrong * 100 / 255);
   put(5, 232, 74, 2, TR_DATUM, C_TXT, C_BG, 44, "%d%%", curWeak * 100 / 255);
   if (c) put(6, 8, 96, 1, TL_DATUM, C_OK, C_BG, 226, T("Kontroler terhubung", "Controller connected"));
   else put(6, 8, 96, 1, TL_DATUM, C_WARN, C_BG, 226, T("Belum ada kontroler", "No controller"));
-  put(7, 8, 108, 1, TL_DATUM, C_SUB, C_BG, 226, T("Atas klik: ganti pola", "Top click: change pattern"));
+  put(7, 8, 108, 1, TL_DATUM, C_SUB, C_BG, 226, T("Bawah klik: ganti pola", "Bottom click: change pattern"));
   put(8, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, T("Trigger: L2=besar, R2=ringan", "Trigger: L2=strong, R2=light"));
   put(9, 8, 127, 1, TL_DATUM, C_SUB, C_BG, 226, T("Berhenti otomatis saat pindah halaman", "Stops automatically on page change"));
 }
 
 // ---------- halaman SETELAN ----------
-// 3 baris: kecerahan, bahasa, tema. Tahan tombol atas 0,7 dtk lalu lepas = pindah baris.
 static int pv_br = -1;
-static uint8_t setRow = 0, drawnLang = 255, drawnTheme = 255;
-#define NSETROWS 3
+static uint8_t setRow = 0, drawnLang = 255, drawnTheme = 255, drawnRow = 255, drawnPair = 255;
+static uint32_t pairConfirmUntil = 0;
+static const uint8_t NSETROW = 4;
+static const int ROW_Y[4] = {24, 46, 68, 90};
 
-static void drawChip(int x, int y, int w, int h, bool on, const char *label) {
-  tft.fillRoundRect(x, y, w, h, RAD(5), on ? C_ACC : C_BAR);
+static void chip(int x, int y, int w, int h, const char *txt, bool on, uint16_t onBg) {
+  tft.fillRoundRect(x, y, w, h, 5, on ? onBg : C_PANEL);
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(on ? C_BG : C_SUB, on ? C_ACC : C_BAR);
+  tft.setTextColor(on ? C_BG : C_SUB, on ? onBg : C_PANEL);
   tft.setTextPadding(0);
-  tft.drawString(label, x + w / 2, y + h / 2 + 1, 2);
+  tft.drawString(txt, x + w / 2, y + h / 2 + 1, 2);
+}
+
+static void drawFocus() {
+  for (int i = 0; i < NSETROW; i++) tft.fillRect(1, ROW_Y[i] - 1, 3, 18, i == setRow ? C_ACC : C_BG);
 }
 
 static void drawLangChips() {
-  drawChip(12, 69, 104, 17, lang == 0, "Indonesia");
-  drawChip(128, 69, 104, 17, lang == 1, "English");
+  const char *n[2] = {"Indonesia", "English"};
+  for (int k = 0; k < 2; k++) chip(70 + k * 84, ROW_Y[1], 80, 18, n[k], lang == k, C_ACC);
 }
 
 static void drawThemeChips() {
-  for (int k = 0; k < NTHEMES; k++) drawChip(8 + k * 76, 105, 70, 17, themeIdx == k, THEMES[k].name);
+  const char *n[3] = {"Default", "AMOLED", "Sky Light"};
+  chip(70, ROW_Y[2], 164, 18, n[themeIdx], true, C_ACC);
+}
+
+static void drawPairChip(int st) {
+  if (st == 2) chip(70, ROW_Y[3], 164, 18, T("Pairing dihapus!", "Pairing cleared!"), true, C_OK);
+  else if (st == 1) chip(70, ROW_Y[3], 164, 18, T("Yakin? Klik lagi", "Sure? Click again"), true, C_WARN);
+  else chip(70, ROW_Y[3], 164, 18, T("Lupakan pairing", "Forget pairing"), false, C_ACC);
 }
 
 static void pageSettings(ControllerPtr c) {
-  put(0, 8, 21, 2, TL_DATUM, setRow == 0 ? C_ACC : C_SUB, C_BG, 170, "%s%s", setRow == 0 ? "> " : "  ", T("Kecerahan layar", "Screen brightness"));
-  put(1, 232, 21, 2, TR_DATUM, C_TXT, C_BG, 56, "%d%%", brightPct);
-  hbar(13, 39, 214, 10, pv_br, brightPct, 100, C_ACC, C_BAR);
-  put(2, 8, 52, 2, TL_DATUM, setRow == 1 ? C_ACC : C_SUB, C_BG, 170, "%s%s", setRow == 1 ? "> " : "  ", T("Bahasa", "Language"));
-  if (drawnLang != lang) {
-    drawnLang = lang;
-    drawLangChips();
+  if (drawnRow != setRow) {
+    drawnRow = setRow;
+    drawFocus();
   }
-  put(3, 8, 88, 2, TL_DATUM, setRow == 2 ? C_ACC : C_SUB, C_BG, 170, "%s%s", setRow == 2 ? "> " : "  ", T("Tema", "Theme"));
-  if (drawnTheme != themeIdx) {
-    drawnTheme = themeIdx;
-    drawThemeChips();
-  }
-  // satu baris petunjuk, bergantian
-  if ((millis() / 2500) % 2) put(4, 8, 126, 1, TL_DATUM, C_SUB, C_BG, 226, "%s", T("Tahan atas 3 dtk: power off", "Hold top 3s: power off"));
-  else put(4, 8, 126, 1, TL_DATUM, C_SUB, C_BG, 226, "%s", T("Atas klik: ubah | tahan: pindah baris", "Top click: change | hold: switch row"));
+  put(0, 8, ROW_Y[0], 2, TL_DATUM, setRow == 0 ? C_ACC : C_SUB, C_BG, 76, "%s", T("Kecerahan", "Brightness"));
+  hbar(89, 28, 104, 8, pv_br, brightPct, 100, C_ACC, C_TRK);
+  put(1, 232, ROW_Y[0], 2, TR_DATUM, C_TXT, C_BG, 40, "%d%%", brightPct);
+  put(2, 8, ROW_Y[1] + 1, 2, TL_DATUM, setRow == 1 ? C_ACC : C_SUB, C_BG, 60, "%s", T("Bahasa", "Language"));
+  put(3, 8, ROW_Y[2] + 1, 2, TL_DATUM, setRow == 2 ? C_ACC : C_SUB, C_BG, 42, "%s", T("Tema", "Theme"));
+  put(4, 8, ROW_Y[3] + 1, 2, TL_DATUM, setRow == 3 ? C_ACC : C_SUB, C_BG, 60, "Pairing");
+  if (drawnLang != lang) { drawnLang = lang; drawLangChips(); }
+  if (drawnTheme != themeIdx) { drawnTheme = themeIdx; drawThemeChips(); }
+  uint8_t ps = millis() < forgetMsgUntil ? 2 : (millis() < pairConfirmUntil ? 1 : 0);
+  if (drawnPair != ps) { drawnPair = ps; drawPairChip(ps); }
+  put(5, 8, 114, 1, TL_DATUM, C_SUB, C_BG, 226, "%s", T("Klik: ubah | 2x klik: pindah baris", "Click: change | 2x click: next row"));
+  put(6, 8, 124, 1, TL_DATUM, C_SUB, C_BG, 226, "%s", T("Atas dobel klik: power off", "Top double-click: power off"));
 }
 
 // ---------- top bar & header ----------
@@ -905,7 +887,6 @@ static void refreshTopBar(ControllerPtr c) {
 }
 
 void header() {
-  offOverlayOn = false;
   tft.fillScreen(C_BG);
   tft.fillRect(0, 0, 240, 19, C_BAR);
   tft.fillRect(0, 19, 240, 1, C_ACC);
@@ -952,9 +933,8 @@ void header() {
       break;
     case P_SETTINGS:
       pv_br = -1;
-      drawnLang = 255;
-      drawnTheme = 255;
-      tft.drawRect(12, 38, 216, 12, C_DIM);
+      drawnLang = drawnTheme = drawnRow = drawnPair = 255;
+      tft.drawRect(88, 27, 106, 10, C_DIM);
       break;
   }
 }
@@ -985,14 +965,18 @@ void powerOff() {
   esp_deep_sleep_start();
 }
 
+static bool clickPending = false;  // klik bawah di SETELAN menunggu: bisa jadi dobel klik
+static uint32_t clickT = 0;
+
 static void goPage(int p) {
   page = p;
+  clickPending = false;
   vibeMode = 0;  // getar berhenti saat pindah halaman
   header();
 }
 
-// aksi tombol atas (pilih) sesuai halaman
-static void topAction() {
+// aksi pilih (klik tombol bawah) sesuai halaman
+static void selectAction() {
   switch (page) {
     case P_BUTTONS: memset(btested, 0, sizeof btested); header(); break;
     case P_TRIGGER: peakL = peakR = 0; header(); break;
@@ -1009,10 +993,19 @@ static void topAction() {
         lang = lang ? 0 : 1;
         prefs.putUChar("lang", lang);
         header();  // gambar ulang dengan bahasa baru
-      } else {
-        applyTheme((themeIdx + 1) % NTHEMES);
+      } else if (setRow == 2) {
+        themeIdx = (themeIdx + 1) % 3;
+        applyTheme(themeIdx);
         prefs.putUChar("theme", themeIdx);
         header();  // gambar ulang dengan tema baru
+      } else {  // lupakan pairing: butuh konfirmasi klik kedua dalam 3 detik
+        if (millis() < pairConfirmUntil) {
+          BP32.forgetBluetoothKeys();
+          forgetMsgUntil = millis() + 3000;
+          pairConfirmUntil = 0;
+        } else {
+          pairConfirmUntil = millis() + 3000;
+        }
       }
       break;
     case P_OUTPUT:
@@ -1021,99 +1014,67 @@ static void topAction() {
   }
 }
 
-// Overlay hitung mundur power off: muncul saat tombol atas ditahan >= 1 dtk, penuh di 3 dtk.
-// pv = pratinjau aksi bila dilepas sekarang: 0 batal, 1 pindah baris (SETELAN), 2 lupakan pairing (STATUS)
-static void drawOffOverlay(uint32_t held, int pv) {
-  static int lastPv = -1, lastW = 0;
-  const int X = 30, Y = 40, W = 180, H = 58, BW = W - 22;
-  if (!offOverlayOn) {
-    offOverlayOn = true;
-    lastPv = -1;
-    lastW = 0;
-    tft.fillRoundRect(X, Y, W, H, RAD(6), C_PANEL);
-    tft.drawRoundRect(X, Y, W, H, RAD(6), C_ACC);
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextPadding(0);
-    tft.setTextColor(C_TXT, C_PANEL);
-    tft.drawString(T("Tahan terus: power off", "Keep holding: power off"), 120, Y + 22, 2);
-    tft.drawRect(X + 10, Y + 40, W - 20, 10, C_DIM);
-    tft.fillRect(X + 11, Y + 41, BW, 8, C_BAR);
-  }
-  if (pv != lastPv) {
-    lastPv = pv;
-    const char *txt = pv == 2 ? T("Lepas: lupakan pairing", "Release: forget pairing")
-                    : pv == 1 ? T("Lepas: pindah baris", "Release: next row")
-                              : T("Lepas: batal", "Release: cancel");
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextPadding(170);
-    tft.setTextColor(C_SUB, C_PANEL);
-    tft.drawString(txt, 120, Y + 5, 2);
-  }
-  int nw = (int)((long)(held - 1000) * BW / 2000);
-  if (nw < 0) nw = 0;
-  if (nw > BW) nw = BW;
-  if (nw > lastW) {
-    tft.fillRect(X + 11 + lastW, Y + 41, nw - lastW, 8, C_ACC);
-    lastW = nw;
-  }
-}
+static void settingsNextRow() { setRow = (setRow + 1) % NSETROW; }
 
 void handleButtons() {
   // status awal dibaca ulang saat boot, jadi klik pembangun tidak terhitung
   static bool lastT = digitalRead(BTN_TOP), lastB = digitalRead(BTN_BOTTOM);
-  static uint32_t edgeT = 0, edgeB = 0, pressT = 0, pressB = 0;
-  static bool pressedT = false, pressedB = false, holdDoneB = false;
+  static uint32_t edgeT = 0, edgeB = 0, firstClickT = 0, pressT = 0, pressB = 0;
+  static bool pressedT = false, holdDoneT = false, pressedB = false, holdDoneB = false, dblB = false;
   uint32_t now = millis();
   bool t = digitalRead(BTN_TOP), b = digitalRead(BTN_BOTTOM);
 
-  // ----- tombol atas (GPIO35). Aksi ditentukan saat DILEPAS menurut lama tahan:
-  //   < 1 dtk          : klik = aksi halaman (SETELAN: < 0,7 dtk)
-  //   SETELAN >= 0,7   : pindah baris (kecerahan / bahasa / tema)
-  //   STATUS  >= 2 dtk : lupakan pairing
-  //   >= 3 dtk (tetap ditahan): power off, overlay hitung mundur muncul sejak 1 dtk
+  // ===== TOMBOL ATAS (GPIO35): tahan 0,35 dtk = halaman berikutnya | dobel klik (< 450 ms) = power off
   if (!t && lastT && now - edgeT > 30) {
     edgeT = now;
-    pressedT = true;
-    pressT = now;
-  }
-  if (pressedT && !t) {  // masih ditahan
-    uint32_t held = now - pressT;
-    if (held >= 1000) {
-      int pv = 0;
-      if (page == P_STATUS && held >= 2000) pv = 2;
-      else if (page == P_SETTINGS) pv = 1;
-      drawOffOverlay(held < 3000 ? held : 3000, pv);
-      if (held >= 3000) powerOff();  // tidak kembali
+    if (firstClickT && now - firstClickT < 450) {
+      powerOff();  // dobel klik, dideteksi saat penekanan kedua
+    } else {
+      firstClickT = now;
+      pressedT = true;
+      holdDoneT = false;
+      pressT = now;
     }
   }
-  if (t && !lastT && pressedT && now - edgeT > 30) {  // dilepas
-    uint32_t held = now - pressT;
-    pressedT = false;
-    if (offOverlayOn) header();  // hapus overlay (juga mereset flag)
-    if (page == P_STATUS && held >= 2000) {
-      BP32.forgetBluetoothKeys();
-      forgetMsgUntil = now + 3000;
-    } else if (page == P_SETTINGS && held >= 700) {
-      setRow = (setRow + 1) % NSETROWS;
-    } else if (held < 1000) {
-      topAction();
-    }
+  if (pressedT && !t && !holdDoneT && now - pressT >= HOLD_MS) {
+    holdDoneT = true;
+    firstClickT = 0;  // tahan bukan bagian dari dobel klik
+    goPage((page + 1) % NPAGES);
   }
+  if (t && !lastT) pressedT = false;
 
-  // ----- tombol bawah (GPIO0): klik = halaman berikutnya | tahan 0,6 dtk = halaman sebelumnya
+  // ===== TOMBOL BAWAH (GPIO0): klik = pilih | tahan 0,35 dtk = halaman sebelumnya
+  //       di SETELAN: dobel klik = pindah baris
   if (!b && lastB && now - edgeB > 30) {
     edgeB = now;
     pressedB = true;
     holdDoneB = false;
+    dblB = false;
     pressB = now;
+    if (clickPending && page == P_SETTINGS && now - clickT < 350) {
+      clickPending = false;
+      dblB = true;
+      settingsNextRow();
+    }
   }
-  if (pressedB && !b && !holdDoneB && !offOverlayOn && now - pressB >= 600) {
+  if (pressedB && !b && !holdDoneB && !dblB && now - pressB >= HOLD_MS) {
     holdDoneB = true;
     goPage((page + NPAGES - 1) % NPAGES);
   }
   if (b && !lastB) {
-    if (pressedB && !holdDoneB && !offOverlayOn) goPage((page + 1) % NPAGES);
+    if (pressedB && !holdDoneB && !dblB) {
+      if (page == P_SETTINGS) {
+        clickPending = true;  // tunggu 350 ms, siapa tahu dobel klik
+        clickT = now;
+      } else {
+        selectAction();
+      }
+    }
     pressedB = false;
+  }
+  if (clickPending && now - clickT >= 350) {
+    clickPending = false;
+    selectAction();
   }
 
   lastT = t;
@@ -1121,25 +1082,25 @@ void handleButtons() {
 }
 
 // ---------- splash screen ----------
-static void splashPad(int cx, int cy) {
-  uint16_t body = TH->padBody;
-  tft.fillCircle(cx - 36, cy + 12, 14, body);
-  tft.fillCircle(cx + 36, cy + 12, 14, body);
-  tft.fillRoundRect(cx - 44, cy - 16, 88, 36, RAD(14), body);
-  tft.fillRoundRect(cx - 14, cy - 12, 28, 13, RAD(3), TH->padPlate);  // touchpad
-  tft.fillRect(cx - 34, cy, 12, 4, TH->padKey);                        // d-pad
-  tft.fillRect(cx - 30, cy - 4, 4, 12, TH->padKey);
-  tft.fillCircle(cx - 12, cy + 12, 7, TH->padStick);                   // stik
-  tft.fillCircle(cx + 12, cy + 12, 7, TH->padStick);
-  tft.drawCircle(cx - 12, cy + 12, 7, C_DIM);
-  tft.drawCircle(cx + 12, cy + 12, 7, C_DIM);
+static uint16_t mix565(uint16_t a, uint16_t b, int n, int d) {
+  int ra = (a >> 11) & 31, ga = (a >> 5) & 63, ba = a & 31;
+  int rb = (b >> 11) & 31, gb = (b >> 5) & 63, bb = b & 31;
+  int r = (ra * (d - n) + rb * n) / d, g = (ga * (d - n) + gb * n) / d, bl = (ba * (d - n) + bb * n) / d;
+  return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
-// campuran linear dua warna RGB565: a + (b - a) * f / n
-static uint16_t mix565(uint16_t a, uint16_t b, int f, int n) {
-  int ar = (a >> 11) & 31, ag = (a >> 5) & 63, ab = a & 31;
-  int br = (b >> 11) & 31, bg2 = (b >> 5) & 63, bb = b & 31;
-  return (uint16_t)(((ar + (br - ar) * f / n) << 11) | ((ag + (bg2 - ag) * f / n) << 5) | (ab + (bb - ab) * f / n));
+static void splashPad(int cx, int cy) {
+  uint16_t body = C_OFF;
+  tft.fillCircle(cx - 36, cy + 12, 14, body);
+  tft.fillCircle(cx + 36, cy + 12, 14, body);
+  tft.fillRoundRect(cx - 44, cy - 16, 88, 36, 14, body);
+  tft.fillRoundRect(cx - 14, cy - 12, 28, 13, 3, C_DIM);  // touchpad
+  tft.fillRect(cx - 34, cy, 12, 4, C_SUB);                // d-pad
+  tft.fillRect(cx - 30, cy - 4, 4, 12, C_SUB);
+  tft.fillCircle(cx - 12, cy + 12, 7, C_PANEL);           // stik
+  tft.fillCircle(cx + 12, cy + 12, 7, C_PANEL);
+  tft.drawCircle(cx - 12, cy + 12, 7, C_DIM);
+  tft.drawCircle(cx + 12, cy + 12, 7, C_DIM);
 }
 
 static void showSplash() {
@@ -1148,12 +1109,18 @@ static void showSplash() {
   splashPad(cx, cy);
   const char *title = "DUALSHOCK";
   const int total = 2600;
+  tft.setTextDatum(TL_DATUM);
   int w1 = tft.textWidth(title, 4);
   int x1 = (240 - w1) / 2;
-  tft.fillRect(60, 124, 120, 4, C_BAR);
+  tft.fillRect(60, 118, 120, 3, C_TRK);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(C_DIM, C_BG);
+  tft.setTextPadding(0);
+  tft.drawString("FW BY DNZEEY", 120, 126, 1);  // credit kecil
+  tft.setTextDatum(TL_DATUM);
   const int bx[4] = {cx + 28, cx + 34, cx + 28, cx + 22};
   const int by[4] = {cy - 4, cy + 2, cy + 8, cy + 2};
-  const uint16_t bc[4] = {TH->fTri, TH->fCircle, TH->fCross, TH->fSquare};
+  const uint16_t bc[4] = {C_FT, C_FO, C_FX, C_PINK};
   int shown = 0, sub = -1, btn = -1;
   uint32_t t0 = millis();
   while (millis() - t0 < (uint32_t)total) {
@@ -1187,14 +1154,13 @@ static void showSplash() {
     if (f > 7) f = 7;
     if (f >= 0 && f != sub) {
       sub = f;
-      uint16_t col = mix565(C_BG, C_ACC, f, 7);
       tft.setTextDatum(TC_DATUM);
-      tft.setTextColor(col, C_BG);
+      tft.setTextColor(mix565(C_BG, C_ACC, f, 7), C_BG);
       tft.setTextPadding(0);
-      tft.drawString("POCKET TESTER", 120, 102, 2);
+      tft.drawString("POCKET TESTER", 120, 100, 2);
     }
 
-    tft.fillRect(60, 124, (int)(120L * e / total), 4, C_ACC);
+    tft.fillRect(60, 118, (int)(120L * e / total), 3, C_ACC);
     delay(16);
   }
 }
@@ -1217,9 +1183,11 @@ void setup() {
 
   lang = prefs.getUChar("lang", 0);
   if (lang > 1) lang = 0;
+  themeIdx = prefs.getUChar("theme", 0);
+  if (themeIdx > 2) themeIdx = 0;
+  applyTheme(themeIdx);
   brightPct = prefs.getUChar("bri", 100);
   if (brightPct < 10 || brightPct > 100) brightPct = 100;
-  applyTheme(prefs.getUChar("theme", 0));  // sebelum layar pertama digambar
 
   tft.init();
   backlightInit();
@@ -1262,7 +1230,7 @@ void loop() {
     prevEv = evCount;
     prevEvT = now;
   }
-  if (now - lastDraw >= 8 && !offOverlayOn) {  // halaman dibekukan selama overlay power off
+  if (now - lastDraw >= 8) {
     lastDraw = now;
     drawPage(c);
   }
