@@ -59,11 +59,10 @@ static const Preset PRESETS[] = {
 #define PNAME(i) (lang ? PRESETS[i].en : PRESETS[i].name)
 static const uint8_t NPRESET = sizeof(PRESETS) / sizeof(PRESETS[0]);
 static const uint8_t NSEL = NPRESET + 3;
-static const char *MODE_ID[3] = {"Stik", "Pelangi", "Mati"};
-static const char *MODE_EN[3] = {"Stick", "Rainbow", "Off"};
+static const char *MODE_ID[3] = {"Stik", "Pelangi", "Default"};
+static const char *MODE_EN[3] = {"Stick", "Rainbow", "Default"};
 #define MODE_NAME(i) (lang ? MODE_EN[i] : MODE_ID[i])
 static uint8_t sel = 0;
-static uint8_t savedColor = 0;
 
 // ---------- statistik ----------
 static uint32_t evCount = 0, lastEvMs = 0, maxGap = 0;
@@ -239,20 +238,54 @@ static void hue(uint8_t h, uint8_t &r, uint8_t &g, uint8_t &b) {
 
 static uint8_t clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 
-static void applyOutput(ControllerPtr c) {
-  static uint8_t prevLed[3] = {1, 1, 1};
-  static uint32_t lastLed = 0, lastRumble = 0, connectedAt = 0, lastForce = 0;
-  static ControllerPtr lastC = nullptr;
+// warna default tiap slot kontroler: 1 = biru, 2 = merah, 3 = hijau, 4 = kuning
+static const uint8_t SLOT_COL[4][3] = {{0, 0, 255}, {255, 0, 0}, {0, 255, 0}, {255, 190, 0}};
 
+static void applyOutput(ControllerPtr c) {
+  static uint8_t prevLed[BP32_MAX_GAMEPADS][3];
+  static uint32_t lastLed[BP32_MAX_GAMEPADS], connectedAt[BP32_MAX_GAMEPADS], lastForce[BP32_MAX_GAMEPADS];
+  static ControllerPtr lastC[BP32_MAX_GAMEPADS];
+  static uint32_t lastRumble = 0;
+  static bool wasRumbling = false;
   uint32_t now = millis();
-  if (!c) { lastC = nullptr; curWeak = curStrong = 0; return; }
-  if (c != lastC) {  // kontroler baru: kirim warna default
-    lastC = c;
-    connectedAt = now;
-    memset(prevLed, 0xFF, sizeof prevLed);
+
+  // LED: setiap kontroler punya warna default sesuai slotnya.
+  // Kontroler terpilih bisa di-override sementara dari halaman OUTPUT.
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    ControllerPtr k = myControllers[i];
+    if (!k || !k->isConnected()) { lastC[i] = nullptr; continue; }
+    if (k != lastC[i]) {  // baru terhubung: kirim warna
+      lastC[i] = k;
+      connectedAt[i] = now;
+      memset(prevLed[i], 0xFF, 3);
+    }
+    if (now - lastLed[i] < 50) continue;
+    lastLed[i] = now;
+    uint8_t r = SLOT_COL[i % 4][0], g = SLOT_COL[i % 4][1], b = SLOT_COL[i % 4][2];
+    if (k == c && sel != NPRESET + 2) {
+      if (sel < NPRESET) {
+        r = PRESETS[sel].r; g = PRESETS[sel].g; b = PRESETS[sel].b;
+      } else if (sel == NPRESET) {
+        r = clamp8((k->axisX() + 512) / 4);
+        g = clamp8((k->axisY() + 512) / 4);
+        b = clamp8(k->throttle() / 4);
+      } else {
+        hue((now / 12) & 0xFF, r, g, b);
+      }
+    }
+    uint8_t cur[3] = {r, g, b};
+    // 2,5 detik pertama setelah konek: kirim ulang tiap 300 ms (DS4 kadang mengabaikan yang pertama)
+    bool force = (now - connectedAt[i] < 2500) && (now - lastForce[i] >= 300);
+    if (force || memcmp(cur, prevLed[i], 3) != 0) {
+      k->setColorLED(r, g, b);
+      memcpy(prevLed[i], cur, 3);
+      if (force) lastForce[i] = now;
+    }
   }
 
-  uint8_t r = 0, g = 0, b = 0, weak = 0, strong = 0;
+  // getar: hanya kontroler terpilih
+  if (!c) { curWeak = curStrong = 0; return; }
+  uint8_t weak = 0, strong = 0;
   if (page == P_VIBRATE) {
     uint32_t t = now % 2000;
     switch (vibeMode) {
@@ -263,34 +296,12 @@ static void applyOutput(ControllerPtr c) {
       case 5: weak = strong = (now % 600 < 300) ? 255 : 0; break;
       case 6: strong = clamp8(c->brake() / 4); weak = clamp8(c->throttle() / 4); break;
     }
-  }
-  if (sel < NPRESET) {
-    r = PRESETS[sel].r; g = PRESETS[sel].g; b = PRESETS[sel].b;
   } else if (sel == NPRESET) {
-    r = clamp8((c->axisX() + 512) / 4);
-    g = clamp8((c->axisY() + 512) / 4);
-    b = clamp8(c->throttle() / 4);
-    if (page != P_VIBRATE) {
-      weak = clamp8(c->throttle() / 4);
-      strong = clamp8(c->brake() / 4);
-    }
-  } else if (sel == NPRESET + 1) {
-    hue((now / 12) & 0xFF, r, g, b);
-  }
-
-  if (now - lastLed >= 50) {
-    lastLed = now;
-    uint8_t cur[3] = {r, g, b};
-    bool force = (now - connectedAt < 2500) && (now - lastForce >= 300);
-    if (force || memcmp(cur, prevLed, sizeof cur) != 0) {
-      c->setColorLED(r, g, b);
-      memcpy(prevLed, cur, sizeof cur);
-      if (force) lastForce = now;
-    }
+    weak = clamp8(c->throttle() / 4);
+    strong = clamp8(c->brake() / 4);
   }
   curWeak = weak;
   curStrong = strong;
-  static bool wasRumbling = false;
   if (weak || strong) {
     if (now - lastRumble >= 100) {
       c->playDualRumble(0, 150, weak, strong);
@@ -604,7 +615,6 @@ static void drawOutputUI() {
     tft.drawRoundRect(x, y, 40, 24, 4, C_DIM);
     tft.drawRoundRect(x - 2, y - 2, 44, 28, 5, i == sel ? C_TXT : C_BG);
     tft.drawRoundRect(x - 3, y - 3, 46, 30, 6, i == sel ? C_TXT : C_BG);
-    if (i == savedColor) tft.fillCircle(x + 34, y + 18, 3, i == 9 ? C_TXT : C_BG);
   }
   for (int k = 0; k < 3; k++) {
     int x = 8 + k * 76;
@@ -622,10 +632,11 @@ static void pageOutput(ControllerPtr c) {
     drawnSel = sel;
     drawOutputUI();
   }
-  if (sel < NPRESET) put(0, 8, 84, 2, TL_DATUM, C_OK, C_BG, 224, T("%s (tersimpan)", "%s (saved)"), PNAME(sel));
+  if (sel < NPRESET) put(0, 8, 84, 2, TL_DATUM, C_OK, C_BG, 224, T("%s (sementara)", "%s (temporary)"), PNAME(sel));
   else put(0, 8, 84, 2, TL_DATUM, C_ACC, C_BG, 224, "Mode %s", MODE_NAME(sel - NPRESET));
   if (sel == NPRESET) put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("RGB: stik kiri+R2 | rumble: R2/L2", "RGB: left stick+R2 | rumble: R2/L2"));
-  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("Atas: ganti | otomatis tersimpan", "Top: change | saved automatically"));
+  else if (sel == NPRESET + 2) put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("Default: kontroler 1 biru, 2 merah", "Default: ctrl 1 blue, 2 red"));
+  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("Atas: ganti | tidak disimpan", "Top: change | not saved"));
 }
 
 // ---------- halaman STATS ----------
@@ -660,8 +671,7 @@ static void drawStatusCard2() {
 }
 
 static void pageStatus(ControllerPtr c) {
-  static uint32_t lastBat = 0, lastAnim = 0;
-  static int batMv = -1;
+  static uint32_t lastAnim = 0;
   int state = c ? 1 : 0;
 
   if (state != st_shown) {
@@ -720,10 +730,13 @@ static void pageStatus(ControllerPtr c) {
     }
   }
 
-  if (batMv < 0 || millis() - lastBat > 5000) { batMv = readBatteryMv(); lastBat = millis(); }
-  put(4, 14, 84, 2, TL_DATUM, C_SUB, C_PANEL, 120, T("Baterai TTGO", "TTGO battery"));
-  if (batMv) put(5, 226, 84, 2, TR_DATUM, C_TXT, C_PANEL, 90, "%d.%02d V", batMv / 1000, (batMv % 1000) / 10);
-  else put(5, 226, 84, 2, TR_DATUM, C_SUB, C_PANEL, 90, "--");
+  put(4, 14, 84, 2, TL_DATUM, C_SUB, C_PANEL, 120, T("Tegangan DS4", "DS4 voltage"));
+  if (c) {
+    int dsMv = 3300 + (c->battery() * 100 / 255) * 9;  // perkiraan dari level baterai (DS4 tidak melaporkan voltase)
+    put(5, 226, 84, 2, TR_DATUM, C_TXT, C_PANEL, 90, "~%d.%02d V", dsMv / 1000, (dsMv % 1000) / 10);
+  } else {
+    put(5, 226, 84, 2, TR_DATUM, C_SUB, C_PANEL, 90, "--");
+  }
   put(6, 14, 100, 2, TL_DATUM, C_SUB, C_PANEL, 120, T("Konek / Putus", "Conn / Disc"));
   put(7, 226, 100, 2, TR_DATUM, C_TXT, C_PANEL, 90, "%lu / %lu", (unsigned long)connCount, (unsigned long)discCount);
   int nCtl = connectedCount();
@@ -784,27 +797,53 @@ static void pageSettings(ControllerPtr c) {
 }
 
 // ---------- top bar & header ----------
+static int ttgoMv = -1;
+
+static int ttgoPct() {
+  if (ttgoMv <= 0) return -1;
+  int p = (ttgoMv - 3300) * 100 / 850;
+  return p < 0 ? 0 : (p > 100 ? 100 : p);
+}
+
+static uint16_t battColor(int pct) { return pct > 50 ? C_OK : (pct > 20 ? C_WARN : C_BAD); }
+
 static void drawTopRight(ControllerPtr c) {
-  tft.fillRect(178, 1, 62, 18, C_BAR);
-  if (c) {
-    tft.fillCircle(188, 10, 4, C_OK);
-    int pct = c->battery() * 100 / 255;
-    uint16_t col = pct > 50 ? C_OK : (pct > 20 ? C_WARN : C_BAD);
-    tft.drawRect(198, 6, 26, 10, C_SUB);
-    tft.fillRect(224, 9, 2, 4, C_SUB);
-    tft.fillRect(199, 7, pct * 24 / 100, 8, col);
+  tft.fillRect(174, 1, 66, 18, C_BAR);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextPadding(0);
+  // TTGO: "T" + ikon baterai (atau "USB" bila baterai tidak terbaca)
+  tft.setTextColor(C_SUB, C_BAR);
+  tft.drawString("T", 176, 6, 1);
+  tft.drawRect(183, 6, 19, 10, C_SUB);
+  tft.fillRect(202, 9, 2, 4, C_SUB);
+  int tp = ttgoPct();
+  if (tp >= 0) {
+    tft.fillRect(184, 7, tp * 17 / 100, 8, battColor(tp));
   } else {
-    tft.drawCircle(188, 10, 4, C_DIM);
-    tft.setTextDatum(TL_DATUM);
     tft.setTextColor(C_DIM, C_BAR);
-    tft.setTextPadding(0);
-    tft.drawString("--", 200, 6, 1);
+    tft.drawString("USB", 184, 7, 1);
+  }
+  // DS4: "D" + ikon baterai
+  tft.setTextColor(c ? C_OK : C_DIM, C_BAR);
+  tft.drawString("D", 209, 6, 1);
+  tft.drawRect(218, 6, 19, 10, c ? C_SUB : C_DIM);
+  tft.fillRect(237, 9, 2, 4, c ? C_SUB : C_DIM);
+  if (c) {
+    int pct = c->battery() * 100 / 255;
+    tft.fillRect(219, 7, pct * 17 / 100, 8, battColor(pct));
+  } else {
+    tft.setTextColor(C_DIM, C_BAR);
+    tft.drawString("--", 223, 7, 1);
   }
 }
 
 static void refreshTopBar(ControllerPtr c) {
   static int lastKey = -2;
-  int key = c ? (c->battery() * 100 / 255) / 5 : -1;
+  static uint32_t lastBat = 0;
+  uint32_t now = millis();
+  if (ttgoMv < 0 || now - lastBat > 5000) { ttgoMv = readBatteryMv(); lastBat = now; }
+  int tp = ttgoPct();
+  int key = ((c ? (c->battery() * 100 / 255) / 5 : -1) + 1) * 1000 + (tp < 0 ? 0 : tp / 5 + 1);
   if (key == lastKey) return;
   lastKey = key;
   drawTopRight(c);
@@ -916,11 +955,7 @@ static void topAction() {
       }
       break;
     case P_OUTPUT:
-      sel = (sel + 1) % NSEL;
-      if (sel < NPRESET && sel != savedColor) {  // simpan warna default ke flash
-        savedColor = sel;
-        prefs.putUChar("col", savedColor);
-      }
+      sel = (sel + 1) % NSEL;  // override sementara untuk kontroler terpilih
       break;
   }
 }
@@ -982,6 +1017,78 @@ void handleButtons() {
   lastB = b;
 }
 
+// ---------- splash screen ----------
+static void splashPad(int cx, int cy) {
+  uint16_t body = RGB(44, 50, 80);
+  tft.fillCircle(cx - 36, cy + 12, 14, body);
+  tft.fillCircle(cx + 36, cy + 12, 14, body);
+  tft.fillRoundRect(cx - 44, cy - 16, 88, 36, 14, body);
+  tft.fillRoundRect(cx - 14, cy - 12, 28, 13, 3, RGB(70, 78, 112));  // touchpad
+  tft.fillRect(cx - 34, cy, 12, 4, C_SUB);                           // d-pad
+  tft.fillRect(cx - 30, cy - 4, 4, 12, C_SUB);
+  tft.fillCircle(cx - 12, cy + 12, 7, RGB(24, 28, 46));              // stik
+  tft.fillCircle(cx + 12, cy + 12, 7, RGB(24, 28, 46));
+  tft.drawCircle(cx - 12, cy + 12, 7, C_DIM);
+  tft.drawCircle(cx + 12, cy + 12, 7, C_DIM);
+}
+
+static void showSplash() {
+  tft.fillScreen(C_BG);
+  const int cx = 120, cy = 40;
+  splashPad(cx, cy);
+  const char *title = "DUALSHOCK";
+  const int total = 2600;
+  int w1 = tft.textWidth(title, 4);
+  int x1 = (240 - w1) / 2;
+  tft.fillRect(60, 124, 120, 4, C_BAR);
+  const int bx[4] = {cx + 28, cx + 34, cx + 28, cx + 22};
+  const int by[4] = {cy - 4, cy + 2, cy + 8, cy + 2};
+  const uint16_t bc[4] = {RGB(70, 225, 150), RGB(255, 90, 90), RGB(90, 150, 255), C_PINK};
+  int shown = 0, sub = -1, btn = -1;
+  uint32_t t0 = millis();
+  while (millis() - t0 < (uint32_t)total) {
+    uint32_t e = millis() - t0;
+    BP32.update();
+
+    uint8_t r, g, b;
+    hue((e / 4) & 0xFF, r, g, b);  // lightbar berganti warna
+    tft.fillRect(cx - 16, cy - 20, 32, 3, tft.color565(r, g, b));
+
+    int k = (e / 160) % 4;  // tombol bergantian menyala
+    if (k != btn) {
+      btn = k;
+      for (int i = 0; i < 4; i++) tft.fillCircle(bx[i], by[i], 3, i == k ? bc[i] : C_DIM);
+    }
+
+    int n = e < 300 ? 0 : (int)((e - 300) / 70);  // judul muncul huruf demi huruf
+    if (n > 9) n = 9;
+    if (n != shown) {
+      shown = n;
+      char buf[12];
+      memcpy(buf, title, n);
+      buf[n] = 0;
+      tft.setTextDatum(TL_DATUM);
+      tft.setTextColor(C_TXT, C_BG);
+      tft.setTextPadding(0);
+      tft.drawString(buf, x1, 72, 4);
+    }
+
+    int f = e < 1100 ? -1 : (int)((e - 1100) / 60);  // subjudul memudar masuk
+    if (f > 7) f = 7;
+    if (f >= 0 && f != sub) {
+      sub = f;
+      uint16_t col = tft.color565(8 * (7 - f) / 7, 10 + (205 - 10) * f / 7, 18 + (255 - 18) * f / 7);
+      tft.setTextDatum(TC_DATUM);
+      tft.setTextColor(col, C_BG);
+      tft.setTextPadding(0);
+      tft.drawString("POCKET TESTER", 120, 102, 2);
+    }
+
+    tft.fillRect(60, 124, (int)(120L * e / total), 4, C_ACC);
+    delay(16);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(BTN_TOP, INPUT);
@@ -996,9 +1103,7 @@ void setup() {
   }
 
   prefs.begin("ds4t", false);
-  savedColor = prefs.getUChar("col", 0);
-  if (savedColor >= NPRESET) savedColor = 0;
-  sel = savedColor;
+  sel = NPRESET + 2;  // default: warna per kontroler (1 biru, 2 merah)
 
   lang = prefs.getUChar("lang", 0);
   if (lang > 1) lang = 0;
@@ -1016,6 +1121,8 @@ void setup() {
   BP32.enableVirtualDevice(false);
   BP32.enableNewBluetoothConnections(true);
 
+  ttgoMv = readBatteryMv();
+  showSplash();
   header();
 }
 
