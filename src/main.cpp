@@ -5,7 +5,7 @@
 // Tombol atas (GPIO35): pilih / aksi di halaman:
 //   TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak | OUTPUT: ganti warna/mode
 //   STATUS: ganti kontroler (tahan 2 dtk: lupakan pairing) | GETAR: ganti pola
-//   SETELAN: kecerahan +10% | STATS: reset jeda maks
+//   SETELAN: kecerahan +10% / bahasa (tahan: pindah baris) | STATS: reset jeda maks
 //   dobel klik (< 450 ms): power off | menyalakan: tekan sekali
 
 #include <Arduino.h>
@@ -42,19 +42,26 @@ static const uint16_t C_PINK = RGB(255, 130, 205);
 
 // ---------- halaman ----------
 enum { P_STATUS, P_BUTTONS, P_TRIGGER, P_STICK, P_SENSOR, P_VIBRATE, P_OUTPUT, P_SETTINGS, P_STATS, NPAGES };
-static const char *TITLES[NPAGES] = {"STATUS", "TOMBOL", "TRIGGER", "STIK", "SENSOR", "GETAR", "OUTPUT", "SETELAN", "STATS"};
+static const char *TITLES_ID[NPAGES] = {"STATUS", "TOMBOL", "TRIGGER", "STIK", "SENSOR", "GETAR", "OUTPUT", "SETELAN", "STATS"};
+static const char *TITLES_EN[NPAGES] = {"STATUS", "BUTTONS", "TRIGGER", "STICKS", "SENSORS", "RUMBLE", "OUTPUT", "SETTINGS", "STATS"};
+#define TITLE(i) (lang ? TITLES_EN[i] : TITLES_ID[i])
 static uint8_t page = 0;
+static uint8_t lang = 0;  // 0 = Indonesia, 1 = English
+#define T(id, en) (lang ? (en) : (id))
 
 // ---------- pilihan output: 10 warna default (disimpan) + 3 mode ----------
-struct Preset { const char *name; uint8_t r, g, b; };
+struct Preset { const char *name, *en; uint8_t r, g, b; };
 static const Preset PRESETS[] = {
-  {"Biru", 0, 0, 255},      {"Merah", 255, 0, 0},   {"Hijau", 0, 255, 0},
-  {"Ungu", 140, 0, 255},    {"Kuning", 255, 190, 0}, {"Cyan", 0, 255, 255},
-  {"Putih", 255, 255, 255}, {"Oranye", 255, 70, 0},  {"Pink", 255, 0, 120},
-  {"Mati", 0, 0, 0}};
+  {"Biru", "Blue", 0, 0, 255},       {"Merah", "Red", 255, 0, 0},      {"Hijau", "Green", 0, 255, 0},
+  {"Ungu", "Purple", 140, 0, 255},   {"Kuning", "Yellow", 255, 190, 0}, {"Cyan", "Cyan", 0, 255, 255},
+  {"Putih", "White", 255, 255, 255}, {"Oranye", "Orange", 255, 70, 0}, {"Pink", "Pink", 255, 0, 120},
+  {"Mati", "Off", 0, 0, 0}};
+#define PNAME(i) (lang ? PRESETS[i].en : PRESETS[i].name)
 static const uint8_t NPRESET = sizeof(PRESETS) / sizeof(PRESETS[0]);
 static const uint8_t NSEL = NPRESET + 3;
-static const char *MODE_NAMES[3] = {"Stik", "Pelangi", "Mati"};
+static const char *MODE_ID[3] = {"Stik", "Pelangi", "Mati"};
+static const char *MODE_EN[3] = {"Stick", "Rainbow", "Off"};
+#define MODE_NAME(i) (lang ? MODE_EN[i] : MODE_ID[i])
 static uint8_t sel = 0;
 static uint8_t savedColor = 0;
 
@@ -89,7 +96,9 @@ static void setBacklight(uint8_t pct) {
 // ---------- tes getar ----------
 static uint8_t vibeMode = 0;
 static uint8_t curWeak = 0, curStrong = 0;
-static const char *VIBE_NAMES[7] = {"Mati", "Besar", "Ringan", "Keduanya", "Ramp", "Pulsa", "Trigger"};
+static const char *VIBE_ID[7] = {"Mati", "Besar", "Ringan", "Keduanya", "Ramp", "Pulsa", "Trigger"};
+static const char *VIBE_EN[7] = {"Off", "Strong", "Light", "Both", "Ramp", "Pulse", "Trigger"};
+#define VIBE_NAME(i) (lang ? VIBE_EN[i] : VIBE_ID[i])
 
 // ---------- cache teks ----------
 static char tc_s[24][48];
@@ -151,6 +160,7 @@ static void vbar(int x, int y, int w, int h, int &prev, int val, int vmax, uint1
 
 // ---------- kontroler ----------
 void onConnectedController(ControllerPtr ctl) {
+  BP32.enableNewBluetoothConnections(true);  // tetap terima pairing baru
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++)
     if (myControllers[i] == ctl) return;  // sudah tercatat
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
@@ -293,9 +303,9 @@ static void applyOutput(ControllerPtr c) {
   }
 }
 
-// ---------- tombol 18 buah ----------
+// ---------- tombol 17 buah ----------
 enum { B_UP, B_DOWN, B_LEFT, B_RIGHT, B_CROSS, B_CIRCLE, B_SQUARE, B_TRI, B_L1, B_R1, B_L2, B_R2,
-       B_L3, B_R3, B_SHARE, B_OPT, B_PS, B_TP, NB };
+       B_L3, B_R3, B_SHARE, B_OPT, B_PS, NB };
 static bool btested[NB];
 static int8_t bdrawn[NB];
 static int pv_l2 = -1, pv_r2 = -1;
@@ -322,7 +332,6 @@ static bool pressedNow(ControllerPtr c, int i) {
     case B_PS: return m & 0x01;
     case B_SHARE: return m & 0x02;
     case B_OPT: return m & 0x04;
-    case B_TP: return (m & ~0x07) || (c->buttons() & ~0x03FF);  // bit misc/tombol di luar yang dikenal
   }
   return false;
 }
@@ -431,13 +440,6 @@ static void drawButton(int i, int st) {
       tft.setTextColor(shape, fill);
       tft.drawString("PS", 120, 64, 1);
       break;
-    case B_TP:
-      tft.fillRoundRect(90, 24, 60, 26, 5, fill);
-      tft.drawRoundRect(90, 24, 60, 26, 5, ln);
-      tft.setTextDatum(MC_DATUM);
-      tft.setTextColor(shape, fill);
-      tft.drawString("TOUCHPAD", 120, 37, 1);
-      break;
   }
 }
 
@@ -474,11 +476,10 @@ static void pageButtons(ControllerPtr c) {
     }
   }
 
-  put(1, 6, 106, 1, TL_DATUM, C_SUB, C_BG, 0, "TERUJI");
+  put(1, 6, 106, 1, TL_DATUM, C_SUB, C_BG, 0, T("TERUJI", "TESTED"));
   if (c) put(0, 6, 116, 2, TL_DATUM, cnt == NB ? C_OK : C_TXT, C_BG, 64, "%d/%d", cnt, NB);
-  else put(0, 6, 116, 2, TL_DATUM, C_WARN, C_BG, 64, "Tunggu..");
-  put(2, 172, 120, 1, TL_DATUM, C_SUB, C_BG, 0, "Atas: reset");
-  put(3, 120, 127, 1, TC_DATUM, C_DIM, C_BG, 0, "m%02X b%03X", c ? c->miscButtons() : 0, c ? (unsigned)c->buttons() : 0);
+  else put(0, 6, 116, 2, TL_DATUM, C_WARN, C_BG, 64, T("Tunggu..", "Wait.."));
+  put(2, 172, 120, 1, TL_DATUM, C_SUB, C_BG, 0, T("Atas: reset", "Top: reset"));
 }
 
 // ---------- halaman TRIGGER ----------
@@ -498,10 +499,10 @@ static void pageTrigger(ControllerPtr c) {
   put(3, 188, 22, 2, TC_DATUM, C_SUB, C_BG, 0, "R2");
   put(0, 52, 40, 4, TC_DATUM, C_TXT, C_BG, 72, "%d%%", (int)(l * 100L / 1023));
   put(1, 188, 40, 4, TC_DATUM, C_TXT, C_BG, 72, "%d%%", (int)(r * 100L / 1023));
-  put(4, 120, 72, 1, TC_DATUM, C_SUB, C_BG, 0, "PUNCAK");
+  put(4, 120, 72, 1, TC_DATUM, C_SUB, C_BG, 0, T("PUNCAK", "PEAK"));
   put(5, 120, 86, 2, TC_DATUM, C_WARN, C_BG, 76, "%d%% %d%%", (int)(peakL * 100L / 1023), (int)(peakR * 100L / 1023));
   put(6, 120, 108, 1, TC_DATUM, C_SUB, C_BG, 76, "%d | %d", l, r);
-  put(7, 120, 122, 1, TC_DATUM, C_SUB, C_BG, 0, "Atas: reset");
+  put(7, 120, 122, 1, TC_DATUM, C_SUB, C_BG, 0, T("Atas: reset", "Top: reset"));
 }
 
 // ---------- halaman STIK ----------
@@ -553,9 +554,9 @@ static void pageStick(ControllerPtr c) {
     }
     put(s, cx, 119, 2, TC_DATUM, C_TXT, C_BG, 112, "%4d %4d", ax, ay);
   }
-  put(2, 62, 24, 1, TC_DATUM, C_SUB, C_BG, 0, "STIK KIRI");
-  put(3, 178, 24, 1, TC_DATUM, C_SUB, C_BG, 0, "STIK KANAN");
-  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, "Atas");
+  put(2, 62, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KIRI", "LEFT STICK"));
+  put(3, 178, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KANAN", "RIGHT STICK"));
+  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, T("Atas", "Top"));
   put(5, 120, 66, 1, TC_DATUM, C_SUB, C_BG, 0, "reset");
 }
 
@@ -612,7 +613,7 @@ static void drawOutputUI() {
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(on ? C_BG : C_SUB, on ? C_ACC : C_BAR);
     tft.setTextPadding(0);
-    tft.drawString(MODE_NAMES[k], x + 35, 114, 2);
+    tft.drawString(MODE_NAME(k), x + 35, 114, 2);
   }
 }
 
@@ -621,15 +622,17 @@ static void pageOutput(ControllerPtr c) {
     drawnSel = sel;
     drawOutputUI();
   }
-  if (sel < NPRESET) put(0, 8, 84, 2, TL_DATUM, C_OK, C_BG, 224, "%s (tersimpan)", PRESETS[sel].name);
-  else put(0, 8, 84, 2, TL_DATUM, C_ACC, C_BG, 224, "Mode %s", MODE_NAMES[sel - NPRESET]);
-  if (sel == NPRESET) put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, "RGB: stik kiri+R2 | rumble: R2/L2");
-  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, "Atas: ganti | otomatis tersimpan");
+  if (sel < NPRESET) put(0, 8, 84, 2, TL_DATUM, C_OK, C_BG, 224, T("%s (tersimpan)", "%s (saved)"), PNAME(sel));
+  else put(0, 8, 84, 2, TL_DATUM, C_ACC, C_BG, 224, "Mode %s", MODE_NAME(sel - NPRESET));
+  if (sel == NPRESET) put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("RGB: stik kiri+R2 | rumble: R2/L2", "RGB: left stick+R2 | rumble: R2/L2"));
+  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, T("Atas: ganti | otomatis tersimpan", "Top: change | saved automatically"));
 }
 
 // ---------- halaman STATS ----------
 static void pageStats(ControllerPtr c) {
-  static const char *L[6] = {"Update/detik", "Jeda update maks", "Total update", "Heap bebas", "Heap minimum", "Uptime"};
+  static const char *LI[6] = {"Update/detik", "Jeda update maks", "Total update", "Heap bebas", "Heap minimum", "Uptime"};
+  static const char *LE[6] = {"Updates/sec", "Max update gap", "Total updates", "Free heap", "Min heap", "Uptime"};
+  const char **L = lang ? LE : LI;
   uint32_t up = millis() / 1000;
   for (int i = 0; i < 6; i++) put(i, 8, 26 + i * 17, 2, TL_DATUM, C_SUB, C_BG, 0, "%s", L[i]);
   put(6, 232, 26, 2, TR_DATUM, C_OK, C_BG, 70, "%lu", (unsigned long)evPerSec);
@@ -682,7 +685,7 @@ static void pageStatus(ControllerPtr c) {
 
   if (state) {
     put(0, 50, 28, 4, TL_DATUM, C_TXT, C_PANEL, 176, "%.12s", c->getModelName().c_str());
-    put(1, 50, 56, 2, TL_DATUM, C_OK, C_PANEL, 76, "Terhubung");
+    put(1, 50, 56, 2, TL_DATUM, C_OK, C_PANEL, 76, T("Terhubung", "Connected"));
     int mask = connectedMask();
     int total = __builtin_popcount(mask);
     int key = total > 1 ? (mask << 4 | selSlot) : 0;
@@ -701,8 +704,8 @@ static void pageStatus(ControllerPtr c) {
     hbar(133, 59, 54, 8, pv_bat, pct, 100, pct > 50 ? C_OK : (pct > 20 ? C_WARN : C_BAD), C_BAR);
     put(2, 196, 56, 2, TL_DATUM, C_TXT, C_PANEL, 36, "%d%%", pct);
   } else {
-    put(0, 50, 28, 4, TL_DATUM, C_TXT, C_PANEL, 176, "Mencari...");
-    put(1, 50, 56, 2, TL_DATUM, C_WARN, C_PANEL, 176, "Tahan PS+Share di DS4");
+    put(0, 50, 28, 4, TL_DATUM, C_TXT, C_PANEL, 176, T("Mencari...", "Searching..."));
+    put(1, 50, 56, 2, TL_DATUM, C_WARN, C_PANEL, 176, T("Tahan PS+Share di DS4", "Hold PS+Share on DS4"));
     if (millis() - lastAnim > 40) {
       lastAnim = millis();
       float a = (millis() / 6 % 360) * 0.0174533f;
@@ -718,49 +721,66 @@ static void pageStatus(ControllerPtr c) {
   }
 
   if (batMv < 0 || millis() - lastBat > 5000) { batMv = readBatteryMv(); lastBat = millis(); }
-  put(4, 14, 84, 2, TL_DATUM, C_SUB, C_PANEL, 120, "Baterai TTGO");
+  put(4, 14, 84, 2, TL_DATUM, C_SUB, C_PANEL, 120, T("Baterai TTGO", "TTGO battery"));
   if (batMv) put(5, 226, 84, 2, TR_DATUM, C_TXT, C_PANEL, 90, "%d.%02d V", batMv / 1000, (batMv % 1000) / 10);
   else put(5, 226, 84, 2, TR_DATUM, C_SUB, C_PANEL, 90, "--");
-  put(6, 14, 100, 2, TL_DATUM, C_SUB, C_PANEL, 120, "Konek / Putus");
+  put(6, 14, 100, 2, TL_DATUM, C_SUB, C_PANEL, 120, T("Konek / Putus", "Conn / Disc"));
   put(7, 226, 100, 2, TR_DATUM, C_TXT, C_PANEL, 90, "%lu / %lu", (unsigned long)connCount, (unsigned long)discCount);
   int nCtl = connectedCount();
-  if (millis() < forgetMsgUntil) put(8, 14, 118, 1, TL_DATUM, C_WARN, C_PANEL, 210, "Pairing dihapus!");
-  else if (nCtl > 1 && (millis() / 2500) % 2 == 0) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, "Kontroler %d/%d | Atas klik: ganti", __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
-  else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, "Atas tahan 2 dtk: lupakan pairing");
-  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, "Bawah: klik maju, tahan mundur");
+  if (millis() < forgetMsgUntil) put(8, 14, 118, 1, TL_DATUM, C_WARN, C_PANEL, 210, T("Pairing dihapus!", "Pairing cleared!"));
+  else if (nCtl > 1 && (millis() / 2500) % 2 == 0) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, T("Kontroler %d/%d | Atas klik: ganti", "Ctrl %d/%d | Top click: switch"), __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
+  else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Atas tahan 2 dtk: lupakan pairing", "Top hold 2s: forget pairing"));
+  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Bawah: klik maju, tahan mundur", "Bottom: click next, hold back"));
 }
 
 // ---------- halaman GETAR ----------
 static int pv_vw = -1, pv_vs = -1;
 
 static void pageVibrate(ControllerPtr c) {
-  put(0, 8, 26, 2, TL_DATUM, C_SUB, C_BG, 0, "Pola");
-  put(1, 232, 26, 2, TR_DATUM, vibeMode ? C_OK : C_DIM, C_BG, 150, "%s", VIBE_NAMES[vibeMode]);
-  put(2, 8, 52, 2, TL_DATUM, C_SUB, C_BG, 0, "Besar");
-  put(3, 8, 74, 2, TL_DATUM, C_SUB, C_BG, 0, "Ringan");
+  put(0, 8, 26, 2, TL_DATUM, C_SUB, C_BG, 0, T("Pola", "Mode"));
+  put(1, 232, 26, 2, TR_DATUM, vibeMode ? C_OK : C_DIM, C_BG, 150, "%s", VIBE_NAME(vibeMode));
+  put(2, 8, 52, 2, TL_DATUM, C_SUB, C_BG, 0, T("Besar", "Strong"));
+  put(3, 8, 74, 2, TL_DATUM, C_SUB, C_BG, 0, T("Ringan", "Light"));
   hbar(66, 55, 118, 12, pv_vs, curStrong, 255, C_ACC, C_BAR);
   hbar(66, 77, 118, 12, pv_vw, curWeak, 255, C_PINK, C_BAR);
   put(4, 232, 52, 2, TR_DATUM, C_TXT, C_BG, 44, "%d%%", curStrong * 100 / 255);
   put(5, 232, 74, 2, TR_DATUM, C_TXT, C_BG, 44, "%d%%", curWeak * 100 / 255);
-  if (c) put(6, 8, 96, 1, TL_DATUM, C_OK, C_BG, 226, "Kontroler terhubung");
-  else put(6, 8, 96, 1, TL_DATUM, C_WARN, C_BG, 226, "Belum ada kontroler");
-  put(7, 8, 108, 1, TL_DATUM, C_SUB, C_BG, 226, "Atas klik: ganti pola");
-  put(8, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, "Trigger: L2=besar, R2=ringan");
-  put(9, 8, 127, 1, TL_DATUM, C_SUB, C_BG, 226, "Berhenti otomatis saat pindah halaman");
+  if (c) put(6, 8, 96, 1, TL_DATUM, C_OK, C_BG, 226, T("Kontroler terhubung", "Controller connected"));
+  else put(6, 8, 96, 1, TL_DATUM, C_WARN, C_BG, 226, T("Belum ada kontroler", "No controller"));
+  put(7, 8, 108, 1, TL_DATUM, C_SUB, C_BG, 226, T("Atas klik: ganti pola", "Top click: change pattern"));
+  put(8, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, T("Trigger: L2=besar, R2=ringan", "Trigger: L2=strong, R2=light"));
+  put(9, 8, 127, 1, TL_DATUM, C_SUB, C_BG, 226, T("Berhenti otomatis saat pindah halaman", "Stops automatically on page change"));
 }
 
 // ---------- halaman SETELAN ----------
 static int pv_br = -1;
+static uint8_t setRow = 0, drawnLang = 255;
+
+static void drawLangChips() {
+  const char *n[2] = {"Indonesia", "English"};
+  for (int k = 0; k < 2; k++) {
+    int x = 12 + k * 116;
+    bool on = (lang == k);
+    tft.fillRoundRect(x, 82, 104, 18, 5, on ? C_ACC : C_BAR);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(on ? C_BG : C_SUB, on ? C_ACC : C_BAR);
+    tft.setTextPadding(0);
+    tft.drawString(n[k], x + 52, 91, 2);
+  }
+}
 
 static void pageSettings(ControllerPtr c) {
-  put(0, 8, 28, 2, TL_DATUM, C_SUB, C_BG, 0, "Kecerahan layar");
-  put(1, 232, 28, 2, TR_DATUM, C_TXT, C_BG, 60, "%d%%", brightPct);
-  hbar(13, 57, 214, 18, pv_br, brightPct, 100, C_ACC, C_BAR);
-  put(2, 12, 82, 1, TL_DATUM, C_SUB, C_BG, 0, "10%%");
-  put(3, 228, 82, 1, TR_DATUM, C_SUB, C_BG, 0, "100%%");
-  put(4, 8, 106, 1, TL_DATUM, C_SUB, C_BG, 226, "Atas klik: +10%%, lalu kembali ke 10%%");
-  put(5, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, "Tersimpan otomatis");
-  put(6, 8, 127, 1, TL_DATUM, C_SUB, C_BG, 226, "Atas dobel klik: power off");
+  put(0, 8, 24, 2, TL_DATUM, setRow == 0 ? C_ACC : C_SUB, C_BG, 170, "%s%s", setRow == 0 ? "> " : "  ", T("Kecerahan layar", "Screen brightness"));
+  put(1, 232, 24, 2, TR_DATUM, C_TXT, C_BG, 56, "%d%%", brightPct);
+  hbar(13, 45, 214, 12, pv_br, brightPct, 100, C_ACC, C_BAR);
+  put(2, 8, 64, 2, TL_DATUM, setRow == 1 ? C_ACC : C_SUB, C_BG, 170, "%s%s", setRow == 1 ? "> " : "  ", T("Bahasa", "Language"));
+  if (drawnLang != lang) {
+    drawnLang = lang;
+    drawLangChips();
+  }
+  put(3, 8, 106, 1, TL_DATUM, C_SUB, C_BG, 226, "%s", T("Atas klik: ubah | tahan: pindah baris", "Top click: change | hold: switch row"));
+  put(4, 8, 116, 1, TL_DATUM, C_SUB, C_BG, 226, "%s", T("Tersimpan otomatis", "Saved automatically"));
+  put(5, 8, 126, 1, TL_DATUM, C_SUB, C_BG, 226, "%s", T("Atas dobel klik: power off", "Top double click: power off"));
 }
 
 // ---------- top bar & header ----------
@@ -797,7 +817,7 @@ void header() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(C_TXT, C_BAR);
   tft.setTextPadding(0);
-  tft.drawString(TITLES[page], 6, 2, 2);
+  tft.drawString(TITLE(page), 6, 2, 2);
   for (int i = 0; i < NPAGES; i++) {
     int x = 112 + i * 7;
     if (i == page) tft.fillCircle(x, 10, 3, C_ACC);
@@ -837,7 +857,8 @@ void header() {
       break;
     case P_SETTINGS:
       pv_br = -1;
-      tft.drawRect(12, 56, 216, 20, C_DIM);
+      drawnLang = 255;
+      tft.drawRect(12, 44, 216, 14, C_DIM);
       break;
   }
 }
@@ -884,9 +905,15 @@ static void topAction() {
     case P_STATUS: cycleController(); break;
     case P_VIBRATE: vibeMode = (vibeMode + 1) % 7; break;
     case P_SETTINGS:
-      brightPct = brightPct >= 100 ? 10 : brightPct + 10;
-      setBacklight(brightPct);
-      prefs.putUChar("bri", brightPct);
+      if (setRow == 0) {
+        brightPct = brightPct >= 100 ? 10 : brightPct + 10;
+        setBacklight(brightPct);
+        prefs.putUChar("bri", brightPct);
+      } else {
+        lang = lang ? 0 : 1;
+        prefs.putUChar("lang", lang);
+        header();  // gambar ulang dengan bahasa baru
+      }
       break;
     case P_OUTPUT:
       sel = (sel + 1) % NSEL;
@@ -923,6 +950,12 @@ void handleButtons() {
     firstClick = 0;
     BP32.forgetBluetoothKeys();
     forgetMsgUntil = now + 3000;
+  }
+  // di SETELAN: tahan 0,7 dtk pindah baris (kecerahan / bahasa)
+  if (pressedT && !t && !longDoneT && page == P_SETTINGS && now - pressT >= 700) {
+    longDoneT = true;
+    firstClick = 0;
+    setRow ^= 1;
   }
   if (t && !lastT) {  // dilepas: klik pendek = aksi pilih
     if (pressedT && !longDoneT && now - pressT < 1000) topAction();
@@ -967,6 +1000,8 @@ void setup() {
   if (savedColor >= NPRESET) savedColor = 0;
   sel = savedColor;
 
+  lang = prefs.getUChar("lang", 0);
+  if (lang > 1) lang = 0;
   brightPct = prefs.getUChar("bri", 100);
   if (brightPct < 10 || brightPct > 100) brightPct = 100;
 
@@ -979,6 +1014,7 @@ void setup() {
   Serial.printf("Bluepad32 firmware: %s\n", BP32.firmwareVersion());
   BP32.setup(&onConnectedController, &onDisconnectedController);
   BP32.enableVirtualDevice(false);
+  BP32.enableNewBluetoothConnections(true);
 
   header();
 }
@@ -991,6 +1027,12 @@ void loop() {
     if (lastEvMs && now - lastEvMs > maxGap && connectedCount()) maxGap = now - lastEvMs;
     lastEvMs = now;
     evCount++;
+  }
+
+  static uint32_t lastScan = 0;
+  if (now - lastScan > 2000) {  // pastikan pairing baru tetap terbuka walau sudah ada yang terhubung
+    lastScan = now;
+    if (connectedCount() < BP32_MAX_GAMEPADS) BP32.enableNewBluetoothConnections(true);
   }
 
   handleButtons();
