@@ -4,7 +4,8 @@
 // GPIO35 = klik: halaman berikutnya | dobel klik (< 450 ms): power off | nyala: tekan sekali
 // GPIO0  = klik pendek, fungsi tergantung halaman:
 //          TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak
-//          OUTPUT: ganti warna/mode | STATS: reset jeda maks
+//          OUTPUT: ganti warna/mode | STATS: reset jeda maks | STATUS: ganti kontroler
+//          GETAR: ganti pola | SETELAN: kecerahan +10%
 //          tahan 2 detik di STATUS: lupakan semua pairing
 
 #include <Arduino.h>
@@ -40,8 +41,8 @@ static const uint16_t C_BAD = RGB(255, 75, 75);
 static const uint16_t C_PINK = RGB(255, 130, 205);
 
 // ---------- halaman ----------
-enum { P_STATUS, P_BUTTONS, P_TRIGGER, P_STICK, P_SENSOR, P_OUTPUT, P_STATS, NPAGES };
-static const char *TITLES[NPAGES] = {"STATUS", "TOMBOL", "TRIGGER", "STIK", "SENSOR", "OUTPUT", "STATS"};
+enum { P_STATUS, P_BUTTONS, P_TRIGGER, P_STICK, P_SENSOR, P_VIBRATE, P_OUTPUT, P_SETTINGS, P_STATS, NPAGES };
+static const char *TITLES[NPAGES] = {"STATUS", "TOMBOL", "TRIGGER", "STIK", "SENSOR", "GETAR", "OUTPUT", "SETELAN", "STATS"};
 static uint8_t page = 0;
 
 // ---------- pilihan output: 10 warna default (disimpan) + 3 mode ----------
@@ -62,6 +63,33 @@ static uint32_t evCount = 0, lastEvMs = 0, maxGap = 0;
 static uint32_t connCount = 0, discCount = 0;
 static uint32_t evPerSec = 0, prevEv = 0, prevEvT = 0;
 static uint32_t forgetMsgUntil = 0;
+
+// ---------- kecerahan layar (PWM backlight) ----------
+#define BL_CH 0
+static uint8_t brightPct = 100;
+
+static void backlightInit() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(TFT_BL, 5000, 8);
+#else
+  ledcSetup(BL_CH, 5000, 8);
+  ledcAttachPin(TFT_BL, BL_CH);
+#endif
+}
+
+static void setBacklight(uint8_t pct) {
+  uint8_t duty = (uint8_t)(255L * pct / 100);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(TFT_BL, duty);
+#else
+  ledcWrite(BL_CH, duty);
+#endif
+}
+
+// ---------- tes getar ----------
+static uint8_t vibeMode = 0;
+static uint8_t curWeak = 0, curStrong = 0;
+static const char *VIBE_NAMES[7] = {"Mati", "Besar", "Ringan", "Keduanya", "Ramp", "Pulsa", "Trigger"};
 
 // ---------- cache teks ----------
 static char tc_s[24][48];
@@ -144,15 +172,24 @@ void onDisconnectedController(ControllerPtr ctl) {
   }
 }
 
-// Kontroler aktif. Tidak lagi memakai hasData(), dan ada masa tenggang 1,5 dtk
-// supaya status tidak berkedip "belum ada kontroler" saat terhubung.
+// Kontroler aktif = slot yang dipilih (selSlot); bila putus, pindah ke yang lain.
+// Tidak memakai hasData(), dan ada masa tenggang 1,5 dtk agar status tidak berkedip.
+static int selSlot = 0;
+
 static ControllerPtr getCtl() {
   static ControllerPtr last = nullptr;
   static uint32_t lastSeen = 0;
   uint32_t now = millis();
+  ControllerPtr c = myControllers[selSlot];
+  if (c && c->isConnected()) {
+    last = c;
+    lastSeen = now;
+    return c;
+  }
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
-    ControllerPtr c = myControllers[i];
+    c = myControllers[i];
     if (c && c->isConnected()) {
+      selSlot = i;
       last = c;
       lastSeen = now;
       return c;
@@ -160,6 +197,20 @@ static ControllerPtr getCtl() {
   }
   if (last && now - lastSeen < 1500) return last;
   return nullptr;
+}
+
+static int connectedMask() {
+  int m = 0;
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++)
+    if (myControllers[i] && myControllers[i]->isConnected()) m |= 1 << i;
+  return m;
+}
+
+static void cycleController() {
+  for (int k = 1; k <= BP32_MAX_GAMEPADS; k++) {
+    int i = (selSlot + k) % BP32_MAX_GAMEPADS;
+    if (myControllers[i] && myControllers[i]->isConnected()) { selSlot = i; return; }
+  }
 }
 
 static int connectedCount() {
@@ -184,7 +235,7 @@ static void applyOutput(ControllerPtr c) {
   static ControllerPtr lastC = nullptr;
 
   uint32_t now = millis();
-  if (!c) { lastC = nullptr; return; }
+  if (!c) { lastC = nullptr; curWeak = curStrong = 0; return; }
   if (c != lastC) {  // kontroler baru: kirim warna default
     lastC = c;
     connectedAt = now;
@@ -192,14 +243,27 @@ static void applyOutput(ControllerPtr c) {
   }
 
   uint8_t r = 0, g = 0, b = 0, weak = 0, strong = 0;
+  if (page == P_VIBRATE) {
+    uint32_t t = now % 2000;
+    switch (vibeMode) {
+      case 1: strong = 255; break;
+      case 2: weak = 255; break;
+      case 3: weak = strong = 255; break;
+      case 4: weak = strong = (uint8_t)(t < 1000 ? t * 255 / 1000 : (2000 - t) * 255 / 1000); break;
+      case 5: weak = strong = (now % 600 < 300) ? 255 : 0; break;
+      case 6: strong = clamp8(c->brake() / 4); weak = clamp8(c->throttle() / 4); break;
+    }
+  }
   if (sel < NPRESET) {
     r = PRESETS[sel].r; g = PRESETS[sel].g; b = PRESETS[sel].b;
   } else if (sel == NPRESET) {
     r = clamp8((c->axisX() + 512) / 4);
     g = clamp8((c->axisY() + 512) / 4);
     b = clamp8(c->throttle() / 4);
-    weak = clamp8(c->throttle() / 4);
-    strong = clamp8(c->brake() / 4);
+    if (page != P_VIBRATE) {
+      weak = clamp8(c->throttle() / 4);
+      strong = clamp8(c->brake() / 4);
+    }
   } else if (sel == NPRESET + 1) {
     hue((now / 12) & 0xFF, r, g, b);
   }
@@ -214,9 +278,18 @@ static void applyOutput(ControllerPtr c) {
       if (force) lastForce = now;
     }
   }
-  if ((weak || strong) && now - lastRumble >= 100) {
-    c->playDualRumble(0, 150, weak, strong);
-    lastRumble = now;
+  curWeak = weak;
+  curStrong = strong;
+  static bool wasRumbling = false;
+  if (weak || strong) {
+    if (now - lastRumble >= 100) {
+      c->playDualRumble(0, 150, weak, strong);
+      lastRumble = now;
+    }
+    wasRumbling = true;
+  } else if (wasRumbling) {
+    c->playDualRumble(0, 0, 0, 0);  // hentikan getar
+    wasRumbling = false;
   }
 }
 
@@ -249,7 +322,7 @@ static bool pressedNow(ControllerPtr c, int i) {
     case B_PS: return m & 0x01;
     case B_SHARE: return m & 0x02;
     case B_OPT: return m & 0x04;
-    case B_TP: return m & 0x08;  // klik touchpad (pemetaan bit perlu dicek di perangkat)
+    case B_TP: return (m & ~0x07) || (c->buttons() & ~0x03FF);  // bit misc/tombol di luar yang dikenal
   }
   return false;
 }
@@ -405,6 +478,7 @@ static void pageButtons(ControllerPtr c) {
   if (c) put(0, 6, 116, 2, TL_DATUM, cnt == NB ? C_OK : C_TXT, C_BG, 64, "%d/%d", cnt, NB);
   else put(0, 6, 116, 2, TL_DATUM, C_WARN, C_BG, 64, "Tunggu..");
   put(2, 172, 120, 1, TL_DATUM, C_SUB, C_BG, 0, "GPIO0: reset");
+  put(3, 120, 127, 1, TC_DATUM, C_DIM, C_BG, 0, "m%02X b%03X", c ? c->miscButtons() : 0, c ? (unsigned)c->buttons() : 0);
 }
 
 // ---------- halaman TRIGGER ----------
@@ -567,7 +641,7 @@ static void pageStats(ControllerPtr c) {
 }
 
 // ---------- halaman STATUS ----------
-static int st_shown = -1, pv_bat = -1;
+static int st_shown = -1, pv_bat = -1, dotsKey = -1;
 static int dotX = -999, dotY;
 
 static int readBatteryMv() {
@@ -592,6 +666,7 @@ static void pageStatus(ControllerPtr c) {
     tft.fillRoundRect(6, 24, 228, 52, 6, C_PANEL);
     for (int i = 0; i < 4; i++) tc_s[i][0] = 0;
     pv_bat = -1;
+    dotsKey = -1;
     dotX = -999;
     if (state) {
       tft.fillCircle(28, 50, 12, C_OK);
@@ -608,6 +683,20 @@ static void pageStatus(ControllerPtr c) {
   if (state) {
     put(0, 50, 28, 4, TL_DATUM, C_TXT, C_PANEL, 176, "%.12s", c->getModelName().c_str());
     put(1, 50, 56, 2, TL_DATUM, C_OK, C_PANEL, 76, "Terhubung");
+    int mask = connectedMask();
+    int total = __builtin_popcount(mask);
+    int key = total > 1 ? (mask << 4 | selSlot) : 0;
+    if (key != dotsKey) {
+      dotsKey = key;
+      tft.fillRect(208, 26, 26, 14, C_PANEL);
+      if (total > 1) {
+        for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+          if (!(mask & (1 << i))) continue;
+          if (i == selSlot) tft.fillCircle(214 + i * 7, 32, 3, C_ACC);
+          else tft.fillCircle(214 + i * 7, 32, 2, C_DIM);
+        }
+      }
+    }
     int pct = c->battery() * 100 / 255;
     hbar(133, 59, 54, 8, pv_bat, pct, 100, pct > 50 ? C_OK : (pct > 20 ? C_WARN : C_BAD), C_BAR);
     put(2, 196, 56, 2, TL_DATUM, C_TXT, C_PANEL, 36, "%d%%", pct);
@@ -634,9 +723,44 @@ static void pageStatus(ControllerPtr c) {
   else put(5, 226, 84, 2, TR_DATUM, C_SUB, C_PANEL, 90, "--");
   put(6, 14, 100, 2, TL_DATUM, C_SUB, C_PANEL, 120, "Konek / Putus");
   put(7, 226, 100, 2, TR_DATUM, C_TXT, C_PANEL, 90, "%lu / %lu", (unsigned long)connCount, (unsigned long)discCount);
+  int nCtl = connectedCount();
   if (millis() < forgetMsgUntil) put(8, 14, 118, 1, TL_DATUM, C_WARN, C_PANEL, 210, "Pairing dihapus!");
+  else if (nCtl > 1) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, "Kontroler %d/%d | GPIO0 klik: ganti", __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
   else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, "GPIO0 tahan 2 dtk: lupakan pairing");
-  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, "GPIO35 klik: halaman | x2: power off");
+  if (nCtl > 1) put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, "Tahan GPIO0: lupakan | GPIO35 x2: off");
+  else put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, "GPIO35 klik: halaman | x2: power off");
+}
+
+// ---------- halaman GETAR ----------
+static int pv_vw = -1, pv_vs = -1;
+
+static void pageVibrate(ControllerPtr c) {
+  put(0, 8, 26, 2, TL_DATUM, C_SUB, C_BG, 0, "Pola");
+  put(1, 232, 26, 2, TR_DATUM, vibeMode ? C_OK : C_DIM, C_BG, 150, "%s", VIBE_NAMES[vibeMode]);
+  put(2, 8, 52, 2, TL_DATUM, C_SUB, C_BG, 0, "Besar");
+  put(3, 8, 74, 2, TL_DATUM, C_SUB, C_BG, 0, "Ringan");
+  hbar(66, 55, 118, 12, pv_vs, curStrong, 255, C_ACC, C_BAR);
+  hbar(66, 77, 118, 12, pv_vw, curWeak, 255, C_PINK, C_BAR);
+  put(4, 232, 52, 2, TR_DATUM, C_TXT, C_BG, 44, "%d%%", curStrong * 100 / 255);
+  put(5, 232, 74, 2, TR_DATUM, C_TXT, C_BG, 44, "%d%%", curWeak * 100 / 255);
+  if (c) put(6, 8, 96, 1, TL_DATUM, C_OK, C_BG, 226, "Kontroler terhubung");
+  else put(6, 8, 96, 1, TL_DATUM, C_WARN, C_BG, 226, "Belum ada kontroler");
+  put(7, 8, 108, 1, TL_DATUM, C_SUB, C_BG, 226, "GPIO0 klik: ganti pola");
+  put(8, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, "Trigger: L2=besar, R2=ringan");
+  put(9, 8, 127, 1, TL_DATUM, C_SUB, C_BG, 226, "Berhenti otomatis saat pindah halaman");
+}
+
+// ---------- halaman SETELAN ----------
+static int pv_br = -1;
+
+static void pageSettings(ControllerPtr c) {
+  put(0, 8, 28, 2, TL_DATUM, C_SUB, C_BG, 0, "Kecerahan layar");
+  put(1, 232, 28, 2, TR_DATUM, C_TXT, C_BG, 60, "%d%%", brightPct);
+  hbar(13, 57, 214, 18, pv_br, brightPct, 100, C_ACC, C_BAR);
+  put(2, 12, 82, 1, TL_DATUM, C_SUB, C_BG, 0, "10%%");
+  put(3, 228, 82, 1, TR_DATUM, C_SUB, C_BG, 0, "100%%");
+  put(4, 8, 106, 1, TL_DATUM, C_SUB, C_BG, 226, "GPIO0 klik: +10%%, lalu kembali ke 10%%");
+  put(5, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, "Tersimpan otomatis");
 }
 
 // ---------- top bar & header ----------
@@ -675,7 +799,7 @@ void header() {
   tft.setTextPadding(0);
   tft.drawString(TITLES[page], 6, 2, 2);
   for (int i = 0; i < NPAGES; i++) {
-    int x = 112 + i * 9;
+    int x = 112 + i * 7;
     if (i == page) tft.fillCircle(x, 10, 3, C_ACC);
     else tft.fillCircle(x, 10, 2, C_DIM);
   }
@@ -705,8 +829,15 @@ void header() {
     case P_SENSOR:
       for (int i = 0; i < 6; i++) pvs[i] = 9999;
       break;
+    case P_VIBRATE:
+      pv_vw = pv_vs = -1;
+      break;
     case P_OUTPUT:
       drawnSel = 255;
+      break;
+    case P_SETTINGS:
+      pv_br = -1;
+      tft.drawRect(12, 56, 216, 20, C_DIM);
       break;
   }
 }
@@ -718,7 +849,9 @@ static void drawPage(ControllerPtr c) {
     case P_TRIGGER: pageTrigger(c); break;
     case P_STICK: pageStick(c); break;
     case P_SENSOR: pageSensor(c); break;
+    case P_VIBRATE: pageVibrate(c); break;
     case P_OUTPUT: pageOutput(c); break;
+    case P_SETTINGS: pageSettings(c); break;
     case P_STATS: pageStats(c); break;
   }
 }
@@ -727,7 +860,7 @@ static void drawPage(ControllerPtr c) {
 void powerOff() {
   while (!digitalRead(BTN_NEXT)) delay(10);  // tunggu tombol dilepas
   delay(80);
-  digitalWrite(TFT_BL, LOW);
+  setBacklight(0);
   tft.writecommand(TFT_DISPOFF);
   tft.writecommand(TFT_SLPIN);
   delay(120);
@@ -746,10 +879,11 @@ void handleButtons() {
   if (!n && lastN && now - edgeN > 30) {
     edgeN = now;
     if (firstClick && now - firstClick < 450) {
-      powerOff();  // dobel klik
+      powerOff();  // dobel klik, dideteksi saat penekanan kedua
     } else {
       firstClick = now;  // klik pertama tetap langsung aksi
       page = (page + 1) % NPAGES;
+      vibeMode = 0;  // getar berhenti saat pindah halaman
       header();
     }
   }
@@ -766,6 +900,13 @@ void handleButtons() {
       case P_TRIGGER: peakL = peakR = 0; header(); break;
       case P_STICK: memset(trace_, 0, sizeof trace_); header(); break;
       case P_STATS: maxGap = 0; break;
+      case P_STATUS: cycleController(); break;
+      case P_VIBRATE: vibeMode = (vibeMode + 1) % 7; break;
+      case P_SETTINGS:
+        brightPct = brightPct >= 100 ? 10 : brightPct + 10;
+        setBacklight(brightPct);
+        prefs.putUChar("bri", brightPct);
+        break;
       case P_OUTPUT:
         sel = (sel + 1) % NSEL;
         if (sel < NPRESET && sel != savedColor) {  // simpan warna default ke flash
@@ -797,7 +938,12 @@ void setup() {
   if (savedColor >= NPRESET) savedColor = 0;
   sel = savedColor;
 
+  brightPct = prefs.getUChar("bri", 100);
+  if (brightPct < 10 || brightPct > 100) brightPct = 100;
+
   tft.init();
+  backlightInit();
+  setBacklight(brightPct);
   tft.setRotation(1);
   tft.fillScreen(C_BG);
 
