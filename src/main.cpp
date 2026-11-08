@@ -1,12 +1,12 @@
 // Tes kontroler Bluetooth (DualShock 4 dll.) untuk LilyGo T-Display (TTGO, ESP32 biasa)
 // Bluepad32: ESP32 scan sendiri, DS4 dipairing dengan PS+Share.
 //
-// GPIO35 = klik: halaman berikutnya | dobel klik (< 450 ms): power off | nyala: tekan sekali
-// GPIO0  = klik pendek, fungsi tergantung halaman:
-//          TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak
-//          OUTPUT: ganti warna/mode | STATS: reset jeda maks | STATUS: ganti kontroler
-//          GETAR: ganti pola | SETELAN: kecerahan +10%
-//          tahan 2 detik di STATUS: lupakan semua pairing
+// Tombol bawah (GPIO0): klik = halaman berikutnya, tahan = halaman sebelumnya
+// Tombol atas (GPIO35): pilih / aksi di halaman:
+//   TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak | OUTPUT: ganti warna/mode
+//   STATUS: ganti kontroler (tahan 2 dtk: lupakan pairing) | GETAR: ganti pola
+//   SETELAN: kecerahan +10% | STATS: reset jeda maks
+//   dobel klik (< 450 ms): power off | menyalakan: tekan sekali
 
 #include <Arduino.h>
 #include <math.h>
@@ -16,8 +16,8 @@
 #include <TFT_eSPI.h>
 #include <Bluepad32.h>
 
-#define BTN_NEXT 35
-#define BTN_MODE 0
+#define BTN_TOP 35
+#define BTN_BOTTOM 0
 #define BAT_ADC 34
 #define BAT_EN 14
 
@@ -477,7 +477,7 @@ static void pageButtons(ControllerPtr c) {
   put(1, 6, 106, 1, TL_DATUM, C_SUB, C_BG, 0, "TERUJI");
   if (c) put(0, 6, 116, 2, TL_DATUM, cnt == NB ? C_OK : C_TXT, C_BG, 64, "%d/%d", cnt, NB);
   else put(0, 6, 116, 2, TL_DATUM, C_WARN, C_BG, 64, "Tunggu..");
-  put(2, 172, 120, 1, TL_DATUM, C_SUB, C_BG, 0, "GPIO0: reset");
+  put(2, 172, 120, 1, TL_DATUM, C_SUB, C_BG, 0, "Atas: reset");
   put(3, 120, 127, 1, TC_DATUM, C_DIM, C_BG, 0, "m%02X b%03X", c ? c->miscButtons() : 0, c ? (unsigned)c->buttons() : 0);
 }
 
@@ -501,7 +501,7 @@ static void pageTrigger(ControllerPtr c) {
   put(4, 120, 72, 1, TC_DATUM, C_SUB, C_BG, 0, "PUNCAK");
   put(5, 120, 86, 2, TC_DATUM, C_WARN, C_BG, 76, "%d%% %d%%", (int)(peakL * 100L / 1023), (int)(peakR * 100L / 1023));
   put(6, 120, 108, 1, TC_DATUM, C_SUB, C_BG, 76, "%d | %d", l, r);
-  put(7, 120, 122, 1, TC_DATUM, C_SUB, C_BG, 0, "GPIO0: reset");
+  put(7, 120, 122, 1, TC_DATUM, C_SUB, C_BG, 0, "Atas: reset");
 }
 
 // ---------- halaman STIK ----------
@@ -555,7 +555,7 @@ static void pageStick(ControllerPtr c) {
   }
   put(2, 62, 24, 1, TC_DATUM, C_SUB, C_BG, 0, "STIK KIRI");
   put(3, 178, 24, 1, TC_DATUM, C_SUB, C_BG, 0, "STIK KANAN");
-  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, "GPIO0");
+  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, "Atas");
   put(5, 120, 66, 1, TC_DATUM, C_SUB, C_BG, 0, "reset");
 }
 
@@ -624,7 +624,7 @@ static void pageOutput(ControllerPtr c) {
   if (sel < NPRESET) put(0, 8, 84, 2, TL_DATUM, C_OK, C_BG, 224, "%s (tersimpan)", PRESETS[sel].name);
   else put(0, 8, 84, 2, TL_DATUM, C_ACC, C_BG, 224, "Mode %s", MODE_NAMES[sel - NPRESET]);
   if (sel == NPRESET) put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, "RGB: stik kiri+R2 | rumble: R2/L2");
-  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, "GPIO0: ganti | otomatis tersimpan");
+  else put(1, 6, 127, 1, TL_DATUM, C_SUB, C_BG, 230, "Atas: ganti | otomatis tersimpan");
 }
 
 // ---------- halaman STATS ----------
@@ -725,10 +725,9 @@ static void pageStatus(ControllerPtr c) {
   put(7, 226, 100, 2, TR_DATUM, C_TXT, C_PANEL, 90, "%lu / %lu", (unsigned long)connCount, (unsigned long)discCount);
   int nCtl = connectedCount();
   if (millis() < forgetMsgUntil) put(8, 14, 118, 1, TL_DATUM, C_WARN, C_PANEL, 210, "Pairing dihapus!");
-  else if (nCtl > 1) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, "Kontroler %d/%d | GPIO0 klik: ganti", __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
-  else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, "GPIO0 tahan 2 dtk: lupakan pairing");
-  if (nCtl > 1) put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, "Tahan GPIO0: lupakan | GPIO35 x2: off");
-  else put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, "GPIO35 klik: halaman | x2: power off");
+  else if (nCtl > 1 && (millis() / 2500) % 2 == 0) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, "Kontroler %d/%d | Atas klik: ganti", __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
+  else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, "Atas tahan 2 dtk: lupakan pairing");
+  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, "Bawah: klik maju, tahan mundur");
 }
 
 // ---------- halaman GETAR ----------
@@ -745,7 +744,7 @@ static void pageVibrate(ControllerPtr c) {
   put(5, 232, 74, 2, TR_DATUM, C_TXT, C_BG, 44, "%d%%", curWeak * 100 / 255);
   if (c) put(6, 8, 96, 1, TL_DATUM, C_OK, C_BG, 226, "Kontroler terhubung");
   else put(6, 8, 96, 1, TL_DATUM, C_WARN, C_BG, 226, "Belum ada kontroler");
-  put(7, 8, 108, 1, TL_DATUM, C_SUB, C_BG, 226, "GPIO0 klik: ganti pola");
+  put(7, 8, 108, 1, TL_DATUM, C_SUB, C_BG, 226, "Atas klik: ganti pola");
   put(8, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, "Trigger: L2=besar, R2=ringan");
   put(9, 8, 127, 1, TL_DATUM, C_SUB, C_BG, 226, "Berhenti otomatis saat pindah halaman");
 }
@@ -759,8 +758,9 @@ static void pageSettings(ControllerPtr c) {
   hbar(13, 57, 214, 18, pv_br, brightPct, 100, C_ACC, C_BAR);
   put(2, 12, 82, 1, TL_DATUM, C_SUB, C_BG, 0, "10%%");
   put(3, 228, 82, 1, TR_DATUM, C_SUB, C_BG, 0, "100%%");
-  put(4, 8, 106, 1, TL_DATUM, C_SUB, C_BG, 226, "GPIO0 klik: +10%%, lalu kembali ke 10%%");
+  put(4, 8, 106, 1, TL_DATUM, C_SUB, C_BG, 226, "Atas klik: +10%%, lalu kembali ke 10%%");
   put(5, 8, 118, 1, TL_DATUM, C_SUB, C_BG, 226, "Tersimpan otomatis");
+  put(6, 8, 127, 1, TL_DATUM, C_SUB, C_BG, 226, "Atas dobel klik: power off");
 }
 
 // ---------- top bar & header ----------
@@ -858,7 +858,7 @@ static void drawPage(ControllerPtr c) {
 
 // ---------- tombol fisik & power ----------
 void powerOff() {
-  while (!digitalRead(BTN_NEXT)) delay(10);  // tunggu tombol dilepas
+  while (!digitalRead(BTN_TOP)) delay(10);  // tunggu tombol dilepas
   delay(80);
   setBacklight(0);
   tft.writecommand(TFT_DISPOFF);
@@ -868,62 +868,91 @@ void powerOff() {
   esp_deep_sleep_start();
 }
 
+static void goPage(int p) {
+  page = p;
+  vibeMode = 0;  // getar berhenti saat pindah halaman
+  header();
+}
+
+// aksi tombol atas (pilih) sesuai halaman
+static void topAction() {
+  switch (page) {
+    case P_BUTTONS: memset(btested, 0, sizeof btested); header(); break;
+    case P_TRIGGER: peakL = peakR = 0; header(); break;
+    case P_STICK: memset(trace_, 0, sizeof trace_); header(); break;
+    case P_STATS: maxGap = 0; break;
+    case P_STATUS: cycleController(); break;
+    case P_VIBRATE: vibeMode = (vibeMode + 1) % 7; break;
+    case P_SETTINGS:
+      brightPct = brightPct >= 100 ? 10 : brightPct + 10;
+      setBacklight(brightPct);
+      prefs.putUChar("bri", brightPct);
+      break;
+    case P_OUTPUT:
+      sel = (sel + 1) % NSEL;
+      if (sel < NPRESET && sel != savedColor) {  // simpan warna default ke flash
+        savedColor = sel;
+        prefs.putUChar("col", savedColor);
+      }
+      break;
+  }
+}
+
 void handleButtons() {
   // status awal dibaca ulang saat boot, jadi klik pembangun tidak terhitung
-  static bool lastN = digitalRead(BTN_NEXT), lastM = digitalRead(BTN_MODE);
-  static uint32_t edgeN = 0, firstClick = 0, pressM = 0;
-  static bool longDone = false;
+  static bool lastT = digitalRead(BTN_TOP), lastB = digitalRead(BTN_BOTTOM);
+  static uint32_t edgeT = 0, edgeB = 0, firstClick = 0, pressT = 0, pressB = 0;
+  static bool pressedT = false, longDoneT = false, pressedB = false, holdDoneB = false;
   uint32_t now = millis();
-  bool n = digitalRead(BTN_NEXT), m = digitalRead(BTN_MODE);
+  bool t = digitalRead(BTN_TOP), b = digitalRead(BTN_BOTTOM);
 
-  if (!n && lastN && now - edgeN > 30) {
-    edgeN = now;
+  // ----- tombol atas (GPIO35): pilih/aksi halaman | tahan 2 dtk di STATUS: lupakan pairing | dobel klik: power off
+  if (!t && lastT && now - edgeT > 30) {
+    edgeT = now;
     if (firstClick && now - firstClick < 450) {
       powerOff();  // dobel klik, dideteksi saat penekanan kedua
     } else {
-      firstClick = now;  // klik pertama tetap langsung aksi
-      page = (page + 1) % NPAGES;
-      vibeMode = 0;  // getar berhenti saat pindah halaman
-      header();
+      firstClick = now;
+      pressedT = true;
+      longDoneT = false;
+      pressT = now;
     }
   }
-
-  if (!m && lastM) { pressM = now; longDone = false; }
-  if (!m && !longDone && page == P_STATUS && now - pressM >= 2000) {
-    longDone = true;
+  if (pressedT && !t && !longDoneT && page == P_STATUS && now - pressT >= 2000) {
+    longDoneT = true;
+    firstClick = 0;
     BP32.forgetBluetoothKeys();
     forgetMsgUntil = now + 3000;
   }
-  if (m && !lastM && !longDone && now - pressM > 30 && now - pressM < 1000) {
-    switch (page) {
-      case P_BUTTONS: memset(btested, 0, sizeof btested); header(); break;
-      case P_TRIGGER: peakL = peakR = 0; header(); break;
-      case P_STICK: memset(trace_, 0, sizeof trace_); header(); break;
-      case P_STATS: maxGap = 0; break;
-      case P_STATUS: cycleController(); break;
-      case P_VIBRATE: vibeMode = (vibeMode + 1) % 7; break;
-      case P_SETTINGS:
-        brightPct = brightPct >= 100 ? 10 : brightPct + 10;
-        setBacklight(brightPct);
-        prefs.putUChar("bri", brightPct);
-        break;
-      case P_OUTPUT:
-        sel = (sel + 1) % NSEL;
-        if (sel < NPRESET && sel != savedColor) {  // simpan warna default ke flash
-          savedColor = sel;
-          prefs.putUChar("col", savedColor);
-        }
-        break;
-    }
+  if (t && !lastT) {  // dilepas: klik pendek = aksi pilih
+    if (pressedT && !longDoneT && now - pressT < 1000) topAction();
+    pressedT = false;
   }
-  lastN = n;
-  lastM = m;
+
+  // ----- tombol bawah (GPIO0): klik = halaman berikutnya | tahan 0,6 dtk = halaman sebelumnya
+  if (!b && lastB && now - edgeB > 30) {
+    edgeB = now;
+    pressedB = true;
+    holdDoneB = false;
+    pressB = now;
+  }
+  if (pressedB && !b && !holdDoneB && now - pressB >= 600) {
+    holdDoneB = true;
+    goPage((page + NPAGES - 1) % NPAGES);
+  }
+  if (b && !lastB) {
+    if (pressedB && !holdDoneB) goPage((page + 1) % NPAGES);
+    pressedB = false;
+  }
+
+  lastT = t;
+  lastB = b;
 }
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BTN_NEXT, INPUT);
-  pinMode(BTN_MODE, INPUT_PULLUP);
+  pinMode(BTN_TOP, INPUT);
+  pinMode(BTN_BOTTOM, INPUT_PULLUP);
   pinMode(BAT_EN, OUTPUT);
   digitalWrite(BAT_EN, LOW);
 
