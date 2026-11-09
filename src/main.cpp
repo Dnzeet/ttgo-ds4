@@ -1,8 +1,8 @@
 // Tes kontroler Bluetooth (DualShock 4 dll.) untuk LilyGo T-Display (TTGO, ESP32 biasa)
 // Bluepad32: ESP32 scan sendiri, DS4 dipairing dengan PS+Share.
 //
-// Tombol atas (GPIO35):  tahan = scroll maju (mulai 0,35 dtk, ulang tiap 0,26 dtk) | dobel klik (< 450 ms) = power off
-// Tombol bawah (GPIO0):  klik = pilih/aksi | tahan = scroll mundur (mulai 0,35 dtk, ulang tiap 0,26 dtk)
+// Tombol atas (GPIO35):  tahan = scroll mundur (mulai 0,45 dtk, ulang tiap 0,42 dtk) | dobel klik (< 450 ms) = power off
+// Tombol bawah (GPIO0):  klik = pilih/aksi | tahan = scroll maju (mulai 0,45 dtk, ulang tiap 0,42 dtk)
 //   Aksi klik bawah per halaman:
 //   STATUS: ganti kontroler | TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak
 //   GETAR: ganti pola | OUTPUT: ganti warna/mode | STATS: reset jeda maks
@@ -17,8 +17,8 @@
 #include <TFT_eSPI.h>
 #include <Bluepad32.h>
 
-#define HOLD_MS 350    // tahan selama ini: mulai pindah halaman (ms)
-#define REPEAT_MS 260  // selama masih ditahan: pindah halaman lagi tiap ini (scroll)
+#define HOLD_MS 450    // tahan selama ini: mulai pindah halaman (ms)
+#define REPEAT_MS 420  // selama masih ditahan: pindah halaman lagi tiap ini (scroll)
 #define BTN_TOP 35
 #define BTN_BOTTOM 0
 #define BAT_ADC 34
@@ -758,7 +758,7 @@ static void pageStatus(ControllerPtr c) {
   if (millis() < forgetMsgUntil) put(8, 14, 118, 1, TL_DATUM, C_WARN, C_PANEL, 210, T("Pairing dihapus!", "Pairing cleared!"));
   else if (nCtl > 1 && (millis() / 2500) % 2 == 0) put(8, 14, 118, 1, TL_DATUM, C_ACC, C_PANEL, 210, T("Kontroler %d/%d | Bawah klik: ganti", "Ctrl %d/%d | Bottom click: switch"), __builtin_popcount(connectedMask() & ((2 << selSlot) - 1)), nCtl);
   else put(8, 14, 118, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Atas dobel klik: power off", "Top double-click: power off"));
-  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Tahan atas: maju, bawah: mundur", "Hold top: next, bottom: back"));
+  put(9, 14, 125, 1, TL_DATUM, C_SUB, C_PANEL, 210, T("Tahan atas: mundur, bawah: maju", "Hold top: back, bottom: next"));
 }
 
 // ---------- halaman GETAR ----------
@@ -1025,7 +1025,7 @@ void handleButtons() {
   uint32_t now = millis();
   bool t = digitalRead(BTN_TOP), b = digitalRead(BTN_BOTTOM);
 
-  // ===== TOMBOL ATAS (GPIO35): tahan = scroll maju (mulai 0,35 dtk, ulang tiap 0,26 dtk) | dobel klik (< 450 ms) = power off
+  // ===== TOMBOL ATAS (GPIO35): tahan = scroll mundur (mulai 0,45 dtk, ulang tiap 0,42 dtk) | dobel klik (< 450 ms) = power off
   if (!t && lastT && now - edgeT > 30) {
     edgeT = now;
     if (firstClickT && now - firstClickT < 450) {
@@ -1042,15 +1042,15 @@ void handleButtons() {
       holdDoneT = true;
       firstClickT = 0;  // tahan bukan bagian dari dobel klik
       lastRepT = now;
-      goPage((page + 1) % NPAGES);
-    } else if (now - lastRepT >= REPEAT_MS) {  // masih ditahan: terus scroll maju
+      goPage((page + NPAGES - 1) % NPAGES);
+    } else if (now - lastRepT >= REPEAT_MS) {  // masih ditahan: terus scroll mundur
       lastRepT = now;
-      goPage((page + 1) % NPAGES);
+      goPage((page + NPAGES - 1) % NPAGES);
     }
   }
   if (t && !lastT) pressedT = false;
 
-  // ===== TOMBOL BAWAH (GPIO0): klik = pilih | tahan = scroll mundur (mulai 0,35 dtk, ulang tiap 0,26 dtk)
+  // ===== TOMBOL BAWAH (GPIO0): klik = pilih | tahan = scroll maju (mulai 0,45 dtk, ulang tiap 0,42 dtk)
   //       di SETELAN: dobel klik = pindah baris
   if (!b && lastB && now - edgeB > 30) {
     edgeB = now;
@@ -1068,10 +1068,10 @@ void handleButtons() {
     if (!holdDoneB) {
       holdDoneB = true;
       lastRepB = now;
-      goPage((page + NPAGES - 1) % NPAGES);
-    } else if (now - lastRepB >= REPEAT_MS) {  // masih ditahan: terus scroll mundur
+      goPage((page + 1) % NPAGES);
+    } else if (now - lastRepB >= REPEAT_MS) {  // masih ditahan: terus scroll maju
       lastRepB = now;
-      goPage((page + NPAGES - 1) % NPAGES);
+      goPage((page + 1) % NPAGES);
     }
   }
   if (b && !lastB) {
