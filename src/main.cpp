@@ -4,7 +4,7 @@
 // Tombol atas (GPIO35):  tahan = scroll mundur (mulai 0,45 dtk, ulang tiap 0,42 dtk) | dobel klik (< 450 ms) = power off
 // Tombol bawah (GPIO0):  klik = pilih/aksi | tahan = scroll maju (mulai 0,45 dtk, ulang tiap 0,42 dtk)
 //   Aksi klik bawah per halaman:
-//   STATUS: ganti kontroler | TOMBOL: reset tes | TRIGGER: reset puncak | STIK: reset jejak
+//   STATUS: ganti kontroler | TOMBOL: reset tes | TRIGGER: reset puncak | STIK: ganti mode (jejak/sirkular/deadzone)
 //   GETAR: ganti pola | OUTPUT: ganti warna/mode | STATS: reset jeda maks
 //   SETELAN: klik = ubah nilai baris aktif, dobel klik = pindah baris
 //   menyalakan: tekan tombol atas sekali
@@ -532,36 +532,98 @@ static void pageTrigger(ControllerPtr c) {
 }
 
 // ---------- halaman STIK ----------
+// ---------- halaman STIK: 3 mode (jejak, sirkularitas, dead zone) ----------
+static uint8_t stickMode = 0;  // 0 = jejak, 1 = sirkularitas, 2 = dead zone
 static uint8_t trace_[2][48];
 static float cosT[48], sinT[48];
 static int spx[2] = {-999, -999}, spy[2];
 
+// data dead zone
+static long dzSumX[2], dzSumY[2];
+static uint32_t dzN[2], dzWStart[2];
+static int dzWMinX[2], dzWMaxX[2], dzWMinY[2], dzWMaxY[2], dzJitX[2], dzJitY[2];
+static int dzLastX[2] = {-999, -999}, dzLastY[2];
+
+static const char *stickModeName() {
+  if (stickMode == 0) return T("JEJAK", "TRACE");
+  if (stickMode == 1) return T("SIRKULAR", "CIRCULAR");
+  return "DEADZONE";
+}
+
+static void resetDz() {
+  for (int s = 0; s < 2; s++) {
+    dzSumX[s] = dzSumY[s] = 0;
+    dzN[s] = 0;
+    dzJitX[s] = dzJitY[s] = 0;
+    dzWMinX[s] = dzWMinY[s] = 9999;
+    dzWMaxX[s] = dzWMaxY[s] = -9999;
+    dzWStart[s] = millis();
+    dzLastX[s] = -999;
+  }
+}
+
+static void resetStickData() {
+  memset(trace_, 0, sizeof trace_);
+  resetDz();
+}
+
+static void stickGeom(int s, int &cx, int &cy, int &R) {
+  if (stickMode == 0) { cx = s ? 178 : 62; cy = 73; R = 40; }
+  else { cx = s ? 180 : 60; cy = 64; R = 28; }
+}
+
 static void stickBase(int s) {
-  int cx = s ? 178 : 62, cy = 73;
-  tft.drawCircle(cx, cy, 40, C_DIM);
-  tft.drawCircle(cx, cy, 20, C_OFF);
-  tft.drawFastHLine(cx - 40, cy, 81, C_OFF);
-  tft.drawFastVLine(cx, cy - 40, 81, C_OFF);
+  int cx, cy, R;
+  stickGeom(s, cx, cy, R);
+  tft.drawCircle(cx, cy, R, C_DIM);
+  tft.drawCircle(cx, cy, R / 2, C_OFF);
+  tft.drawFastHLine(cx - R, cy, 2 * R + 1, C_OFF);
+  tft.drawFastVLine(cx, cy - R, 2 * R + 1, C_OFF);
 }
 
 static void stickTrace(int s) {
-  int cx = s ? 178 : 62, cy = 73;
+  int cx, cy, R;
+  stickGeom(s, cx, cy, R);
   for (int b = 0; b < 48; b++) {
     if (!trace_[s][b]) continue;
-    float r = trace_[s][b] / 100.0f * 40.0f;
+    float r = trace_[s][b] / 100.0f * R;
     tft.fillRect(cx + (int)(cosT[b] * r) - 1, cy + (int)(sinT[b] * r) - 1, 3, 3, C_OK);
   }
 }
 
-static void pageStick(ControllerPtr c) {
+// statistik sirkularitas dari jarak terjauh di 48 arah
+static void circStats(int s, int &cov, int &mn, int &mx, float &err, int &maxAll) {
+  maxAll = 0;
+  for (int b = 0; b < 48; b++) if (trace_[s][b] > maxAll) maxAll = trace_[s][b];
+  cov = 0; mn = 999; mx = 0; err = 0;
+  if (!maxAll) return;
+  int thr = maxAll * 8 / 10;  // hanya arah yang sudah sampai dekat tepi
+  float sum = 0;
+  for (int b = 0; b < 48; b++) {
+    int v = trace_[s][b];
+    if (v && v >= thr) {
+      cov++;
+      sum += v;
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+  }
+  if (!cov) return;
+  float mean = sum / cov;
+  float dev = fmaxf(mx - mean, mean - mn);
+  err = dev / mean * 100.0f;
+}
+
+static void pageStickRing(ControllerPtr c) {
   for (int s = 0; s < 2; s++) {
-    int cx = s ? 178 : 62, cy = 73;
+    int cx, cy, R;
+    stickGeom(s, cx, cy, R);
     int ax = c ? (s ? c->axisRX() : c->axisX()) : 0;
     int ay = c ? (s ? c->axisRY() : c->axisY()) : 0;
     float nx = ax / 512.0f, ny = ay / 512.0f;
     float r = sqrtf(nx * nx + ny * ny);
     float k = r > 1.1f ? 1.1f / r : 1.0f;
-    int px = cx + (int)(nx * k * 40), py = cy + (int)(ny * k * 40);
+    int px = cx + (int)(nx * k * R), py = cy + (int)(ny * k * R);
     bool newTrace = false;
     if (r > 0.3f) {
       int b = (int)((atan2f(ny, nx) + PI) * 48.0f / (2.0f * PI));
@@ -578,12 +640,99 @@ static void pageStick(ControllerPtr c) {
       spx[s] = px;
       spy[s] = py;
     }
-    put(s, cx, 119, 2, TC_DATUM, C_TXT, C_BG, 112, "%4d %4d", ax, ay);
+    if (stickMode == 0) {
+      put(s, cx, 119, 2, TC_DATUM, C_TXT, C_BG, 112, "%4d %4d", ax, ay);
+    } else {
+      int cov, mn, mx, maxAll;
+      float err;
+      circStats(s, cov, mn, mx, err, maxAll);
+      bool ready = (cov >= 44 && maxAll >= 90);
+      int e10 = (int)(err * 10.0f + 0.5f);
+      uint16_t col = !ready ? C_SUB : (err < 5.0f ? C_OK : (err < 10.0f ? C_WARN : C_BAD));
+      if (ready) put(6 + s, cx, 97, 2, TC_DATUM, col, C_BG, 112, "Err %d.%d%%", e10 / 10, e10 % 10);
+      else put(6 + s, cx, 97, 2, TC_DATUM, col, C_BG, 112, "Err --");
+      if (cov) put(8 + s, cx, 114, 1, TC_DATUM, C_TXT, C_BG, 112, "Min %d Max %d", mn, mx);
+      else put(8 + s, cx, 114, 1, TC_DATUM, C_SUB, C_BG, 112, "Min - Max -");
+      if (ready) put(10 + s, cx, 124, 1, TC_DATUM, C_SUB, C_BG, 112, T("Cakupan %d/48", "Coverage %d/48"), cov);
+      else put(10 + s, cx, 124, 1, TC_DATUM, C_SUB, C_BG, 112, T("Putar tepi: %d/48", "Rotate rim: %d/48"), cov);
+    }
   }
-  put(2, 62, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KIRI", "LEFT STICK"));
-  put(3, 178, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KANAN", "RIGHT STICK"));
-  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, T("Bawah", "Bottom"));
-  put(5, 120, 66, 1, TC_DATUM, C_SUB, C_BG, 0, "reset");
+}
+
+static void dzBoxBase(int s) {
+  int cx = s ? 180 : 60, cy = 64;
+  tft.drawRect(cx - 31, cy - 31, 63, 63, C_DIM);
+  tft.drawCircle(cx, cy, 5, C_OFF);   // 2%
+  tft.drawCircle(cx, cy, 12, C_OFF);  // 5%
+  tft.drawCircle(cx, cy, 24, C_OFF);  // 10%
+  tft.drawFastHLine(cx - 30, cy, 61, C_OFF);
+  tft.drawFastVLine(cx, cy - 30, 61, C_OFF);
+}
+
+static void pageDeadzone(ControllerPtr c) {
+  uint32_t now = millis();
+  for (int s = 0; s < 2; s++) {
+    int cx = s ? 180 : 60, cy = 64;
+    int ax = c ? (s ? c->axisRX() : c->axisX()) : 0;
+    int ay = c ? (s ? c->axisRY() : c->axisY()) : 0;
+    if (c && (long)ax * ax + (long)ay * ay < 102L * 102L) {  // stik dilepas (< 20%)
+      dzSumX[s] += ax;
+      dzSumY[s] += ay;
+      dzN[s]++;
+      if (ax < dzWMinX[s]) dzWMinX[s] = ax;
+      if (ax > dzWMaxX[s]) dzWMaxX[s] = ax;
+      if (ay < dzWMinY[s]) dzWMinY[s] = ay;
+      if (ay > dzWMaxY[s]) dzWMaxY[s] = ay;
+      if (abs(ax) < 64 && abs(ay) < 64) {  // plot zoom: kotak = +-12,5%
+        int px = cx + ax * 30 / 64, py = cy + ay * 30 / 64;
+        if (px != dzLastX[s] || py != dzLastY[s]) {
+          if (dzLastX[s] != -999) {
+            tft.fillRect(dzLastX[s] - 1, dzLastY[s] - 1, 3, 3, C_BG);
+            tft.fillRect(dzLastX[s] - 1, dzLastY[s] - 1, 2, 2, C_ACC);
+          }
+          tft.fillRect(px - 1, py - 1, 3, 3, C_TXT);
+          dzLastX[s] = px;
+          dzLastY[s] = py;
+        }
+      }
+    }
+    if (now - dzWStart[s] >= 1500) {  // jitter: selisih puncak ke puncak per jendela 1,5 dtk
+      if (dzWMaxX[s] >= dzWMinX[s]) {
+        int jx = dzWMaxX[s] - dzWMinX[s], jy = dzWMaxY[s] - dzWMinY[s];
+        if (jx > dzJitX[s]) dzJitX[s] = jx;
+        if (jy > dzJitY[s]) dzJitY[s] = jy;
+      }
+      dzWMinX[s] = dzWMinY[s] = 9999;
+      dzWMaxX[s] = dzWMaxY[s] = -9999;
+      dzWStart[s] = now;
+    }
+    uint32_t n = dzN[s];
+    int mx = n ? (int)(dzSumX[s] / (long)n) : 0;
+    int my = n ? (int)(dzSumY[s] / (long)n) : 0;
+    if (n >= 30) {
+      float off = sqrtf((float)mx * mx + (float)my * my) / 512.0f * 100.0f;
+      float jit = sqrtf((float)dzJitX[s] * dzJitX[s] + (float)dzJitY[s] * dzJitY[s]) / 2.0f / 512.0f * 100.0f;
+      float dz = off + jit;  // dead zone minimum yang menutup offset + jitter
+      int d10 = (int)(dz * 10.0f + 0.5f);
+      uint16_t col = dz < 2.0f ? C_OK : (dz < 5.0f ? C_WARN : C_BAD);
+      put(6 + s, cx, 116, 2, TC_DATUM, col, C_BG, 112, "DZ %d.%d%%", d10 / 10, d10 % 10);
+      put(8 + s, cx, 98, 1, TC_DATUM, C_TXT, C_BG, 112, T("Tengah %d,%d", "Center %d,%d"), mx, my);
+    } else {
+      put(6 + s, cx, 116, 2, TC_DATUM, C_SUB, C_BG, 112, "DZ --");
+      put(8 + s, cx, 98, 1, TC_DATUM, C_SUB, C_BG, 112, T("Lepas stik...", "Release stick..."));
+    }
+    put(10 + s, cx, 107, 1, TC_DATUM, C_SUB, C_BG, 112, "Jitter %d,%d", dzJitX[s], dzJitY[s]);
+  }
+}
+
+static void pageStick(ControllerPtr c) {
+  int lx = stickMode == 0 ? 62 : 60, rx = stickMode == 0 ? 178 : 180;
+  put(2, lx, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KIRI", "LEFT STICK"));
+  put(3, rx, 24, 1, TC_DATUM, C_SUB, C_BG, 0, T("STIK KANAN", "RIGHT STICK"));
+  put(4, 120, 56, 1, TC_DATUM, C_SUB, C_BG, 0, T("Bawah:", "Bottom:"));
+  put(5, 120, 66, 1, TC_DATUM, C_SUB, C_BG, 0, "mode");
+  if (stickMode == 2) pageDeadzone(c);
+  else pageStickRing(c);
 }
 
 // ---------- halaman SENSOR ----------
@@ -895,6 +1044,11 @@ void header() {
   tft.setTextColor(C_TXT, C_BAR);
   tft.setTextPadding(0);
   tft.drawString(TITLE(page), 6, 2, 2);
+  if (page == P_STICK) {  // label mode di samping judul
+    tft.setTextColor(C_ACC, C_BAR);
+    tft.drawString(stickModeName(), 60, 6, 1);
+    tft.setTextColor(C_TXT, C_BAR);
+  }
   for (int i = 0; i < NPAGES; i++) {
     int x = 112 + i * 7;
     if (i == page) tft.fillCircle(x, 10, 3, C_ACC);
@@ -920,8 +1074,14 @@ void header() {
       break;
     case P_STICK:
       spx[0] = spx[1] = -999;
-      stickBase(0);
-      stickBase(1);
+      if (stickMode == 2) {
+        resetDz();
+        dzBoxBase(0);
+        dzBoxBase(1);
+      } else {
+        stickBase(0);
+        stickBase(1);
+      }
       break;
     case P_SENSOR:
       for (int i = 0; i < 6; i++) pvs[i] = 9999;
@@ -981,7 +1141,7 @@ static void selectAction() {
   switch (page) {
     case P_BUTTONS: memset(btested, 0, sizeof btested); header(); break;
     case P_TRIGGER: peakL = peakR = 0; header(); break;
-    case P_STICK: memset(trace_, 0, sizeof trace_); header(); break;
+    case P_STICK: stickMode = (stickMode + 1) % 3; resetStickData(); header(); break;
     case P_STATS: maxGap = 0; break;
     case P_STATUS: cycleController(); break;
     case P_VIBRATE: vibeMode = (vibeMode + 1) % 7; break;
